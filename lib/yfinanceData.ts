@@ -1,10 +1,10 @@
 // ==================== 數據源對接層 ====================
-// 使用 Alpha Vantage API（唔會被 Vercel block）
+// 使用 Twelve Data API（免費版每分鐘 800 次，支援港股）
 
 const NodeCache = require("node-cache");
 const cache = new NodeCache({ stdTTL: 300 });
 
-const ALPHA_VANTAGE_KEY = process.env.ALPHA_VANTAGE_KEY || "XQOF0OOC5CFZEBJJ";
+const TWELVE_DATA_KEY = process.env.TWELVE_DATA_KEY || "649e2910371546de92d4cf65b78895de";
 
 export interface QuoteData {
   symbol: string;
@@ -36,65 +36,71 @@ export interface IndicatorData {
   atr: number;
 }
 
+// ==================== 轉換股票代號 ====================
+function convertSymbol(symbol: string): string {
+  // 港股：00700.HK → 700:HKEX
+  if (symbol.includes(".HK")) {
+    const num = symbol.replace(".HK", "").replace(/^0+/, "");
+    return `${num}:HKEX`;
+  }
+  // 純數字（港股）
+  if (/^\d+$/.test(symbol)) {
+    const num = symbol.replace(/^0+/, "");
+    return `${num}:HKEX`;
+  }
+  // 美股直接用原本 symbol
+  return symbol;
+}
+
 // ==================== fetchQuote: 獲取實時報價 ====================
 async function fetchQuote(symbol: string): Promise<QuoteData> {
   const cacheKey = `quote_${symbol}`;
   const cached = cache.get(cacheKey) as QuoteData | undefined;
   if (cached) return cached;
 
-  // 港股：00700.HK → 0700.HKG（Alpha Vantage 格式）
-  // 美股：NVDA → NVDA
-  let avSymbol = symbol;
-  if (symbol.includes(".HK")) {
-    // 移除前導零，加 .HKG
-    const num = symbol.replace(".HK", "").replace(/^0+/, "");
-    avSymbol = `${num}.HKG`;
-  } else if (/^\d+$/.test(symbol)) {
-    const num = symbol.replace(/^0+/, "");
-    avSymbol = `${num}.HKG`;
-  }
+  const tdSymbol = convertSymbol(symbol);
 
   try {
-    const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${avSymbol}&apikey=${ALPHA_VANTAGE_KEY}`;
+    const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(tdSymbol)}&apikey=${TWELVE_DATA_KEY}`;
     const response = await fetch(url, {
       signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
-      throw new Error(`Alpha Vantage HTTP ${response.status}`);
+      throw new Error(`Twelve Data HTTP ${response.status}`);
     }
 
     const data = await response.json();
-    const q = data["Global Quote"];
 
-    if (!q || !q["05. price"]) {
-      console.error(`[AlphaVantage] No data for ${avSymbol}:`, JSON.stringify(data).slice(0, 200));
-      throw new Error(`No price data for ${avSymbol}`);
+    if (data.status === "error" || data.code) {
+      console.error(`[TwelveData] Error for ${tdSymbol}:`, data.message || JSON.stringify(data));
+      throw new Error(`No data for ${tdSymbol}: ${data.message}`);
     }
 
-    const price = parseFloat(q["05. price"]);
-    const change = parseFloat(q["09. change"]);
-    const changePercent = parseFloat(q["10. change percent"].replace("%", "")) / 100;
+    const price = parseFloat(data.close);
+    const open = parseFloat(data.open);
+    const change = price - open;
+    const changePercent = open > 0 ? (change / open) : 0;
 
     const quote: QuoteData = {
       symbol,
       price,
       change,
       changePercent,
-      open: parseFloat(q["02. open"]),
-      high: parseFloat(q["03. high"]),
-      low: parseFloat(q["04. low"]),
-      volume: parseInt(q["06. volume"]),
+      open,
+      high: parseFloat(data.high) || price,
+      low: parseFloat(data.low) || price,
+      volume: parseInt(data.volume) || 0,
       timestamp: Date.now(),
       status: "live",
     };
 
     cache.set(cacheKey, quote, 60);
-    console.log(`[AlphaVantage] ✅ ${avSymbol}: $${price}`);
+    console.log(`[TwelveData] ✅ ${tdSymbol}: $${price}`);
     return quote;
 
   } catch (error) {
-    console.error(`[AlphaVantage] Error for ${avSymbol}:`, error);
+    console.error(`[TwelveData] Error for ${tdSymbol}:`, error);
     throw new Error(`Failed to fetch quote for ${symbol}`);
   }
 }
@@ -108,50 +114,46 @@ async function fetchHistoricalData(
   const cached = cache.get(cacheKey) as CandleData[] | undefined;
   if (cached) return cached;
 
-  let avSymbol = symbol;
-  if (symbol.includes(".HK")) {
-    const num = symbol.replace(".HK", "").replace(/^0+/, "");
-    avSymbol = `${num}.HKG`;
-  } else if (/^\d+$/.test(symbol)) {
-    const num = symbol.replace(/^0+/, "");
-    avSymbol = `${num}.HKG`;
-  }
+  const tdSymbol = convertSymbol(symbol);
+
+  // 將 period 轉換成 outputsize
+  const outputsize = period === "1mo" ? 22 : period === "3mo" ? 66 : 130;
 
   try {
-    const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${avSymbol}&outputsize=compact&apikey=${ALPHA_VANTAGE_KEY}`;
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(tdSymbol)}&interval=1day&outputsize=${outputsize}&apikey=${TWELVE_DATA_KEY}`;
     const response = await fetch(url, {
       signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
-      throw new Error(`Alpha Vantage HTTP ${response.status}`);
+      throw new Error(`Twelve Data HTTP ${response.status}`);
     }
 
     const data = await response.json();
-    const timeSeries = data["Time Series (Daily)"];
 
-    if (!timeSeries) {
-      console.error(`[AlphaVantage] No historical data for ${avSymbol}`);
-      throw new Error(`No historical data for ${avSymbol}`);
+    if (data.status === "error" || data.code) {
+      console.error(`[TwelveData] Historical error for ${tdSymbol}:`, data.message);
+      throw new Error(`No historical data for ${tdSymbol}`);
     }
 
-    const candles: CandleData[] = Object.entries(timeSeries)
-      .map(([date, values]: [string, any]) => ({
-        date,
-        open: parseFloat(values["1. open"]),
-        high: parseFloat(values["2. high"]),
-        low: parseFloat(values["3. low"]),
-        close: parseFloat(values["4. close"]),
-        volume: parseInt(values["5. volume"]),
+    const values = data.values || [];
+    const candles: CandleData[] = values
+      .map((v: any) => ({
+        date: v.datetime,
+        open: parseFloat(v.open),
+        high: parseFloat(v.high),
+        low: parseFloat(v.low),
+        close: parseFloat(v.close),
+        volume: parseInt(v.volume) || 0,
       }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+      .reverse(); // Twelve Data 係由新到舊，要反轉
 
     cache.set(cacheKey, candles, 300);
-    console.log(`[AlphaVantage] ✅ Fetched ${candles.length} candles for ${avSymbol}`);
+    console.log(`[TwelveData] ✅ Fetched ${candles.length} candles for ${tdSymbol}`);
     return candles;
 
   } catch (error) {
-    console.error(`[AlphaVantage] Historical error for ${avSymbol}:`, error);
+    console.error(`[TwelveData] Historical error for ${tdSymbol}:`, error);
     throw new Error(`Failed to fetch historical data for ${symbol}`);
   }
 }
