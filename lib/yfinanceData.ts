@@ -39,7 +39,7 @@ export interface IndicatorData {
 // ==================== fetchQuote: 獲取實時報價 ====================
 async function fetchQuote(symbol: string): Promise<QuoteData> {
   const cacheKey = `quote_${symbol}`;
-  const cached = cache.get<QuoteData>(cacheKey);
+  const cached = cache.get(cacheKey) as QuoteData | undefined;
   if (cached) return cached;
 
   // 港股：00700.HK → 0700.HKG（Alpha Vantage 格式）
