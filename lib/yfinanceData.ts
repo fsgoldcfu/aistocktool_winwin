@@ -105,7 +105,7 @@ async function fetchHistoricalData(
   period: string = "3mo"
 ): Promise<CandleData[]> {
   const cacheKey = `history_${symbol}_${period}`;
-  const cached = cache.get<CandleData[]>(cacheKey);
+  const cached = cache.get(cacheKey) as CandleData[] | undefined;
   if (cached) return cached;
 
   let avSymbol = symbol;
