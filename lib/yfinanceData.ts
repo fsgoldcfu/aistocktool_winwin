@@ -38,15 +38,15 @@ export interface IndicatorData {
 
 // ==================== 轉換股票代號 ====================
 function convertSymbol(symbol: string): string {
-  // 港股：00700.HK → 700:HKEX
+  // 港股：00700.HK → 700.HK（保留 .HK 格式）
   if (symbol.includes(".HK")) {
     const num = symbol.replace(".HK", "").replace(/^0+/, "");
-    return `${num}:HKEX`;
+    return `${num}.HK`;
   }
   // 純數字（港股）
   if (/^\d+$/.test(symbol)) {
     const num = symbol.replace(/^0+/, "");
-    return `${num}:HKEX`;
+    return `${num}.HK`;
   }
   // 美股直接用原本 symbol
   return symbol;
@@ -61,7 +61,8 @@ async function fetchQuote(symbol: string): Promise<QuoteData> {
   const tdSymbol = convertSymbol(symbol);
 
   try {
-    const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(tdSymbol)}&apikey=${TWELVE_DATA_KEY}`;
+    const isHK = tdSymbol.includes(".HK");
+const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(tdSymbol)}${isHK ? "&exchange=HKEX" : ""}&apikey=${TWELVE_DATA_KEY}`;
     const response = await fetch(url, {
       signal: AbortSignal.timeout(15000),
     });
