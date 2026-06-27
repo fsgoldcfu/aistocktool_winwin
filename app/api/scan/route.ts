@@ -2,7 +2,7 @@
 // 美股掃描 API（無需登入版本）
 
 import { NextRequest, NextResponse } from 'next/server'
-import { runUSScannerV3_7 } from '@/lib/usScannerV3_7'
+import { runUSScannerV3_7 } from '../../../lib/usScannerV3_7'
 
 export async function POST(req: NextRequest) {
   try {
