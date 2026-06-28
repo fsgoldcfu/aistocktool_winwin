@@ -1,12 +1,11 @@
-// ==================== 數據源對接層（美股版 - 混合方案） ====================
-// fetchQuote: 用 Finnhub（即時報價，免費版支援）
-// fetchHistoricalData: 用 Twelve Data（歷史K線，Finnhub免費版已不支援）
+// ==================== 數據源對接層（純 Finnhub 版） ====================
+// 唔需要歷史K線，淨係用 Finnhub /quote endpoint
+// 技術指標用簡化公式從 quote 嘅 high/low/open/close/prevClose 推算
 
 const NodeCache = require("node-cache");
 const cache = new NodeCache({ stdTTL: 900 }); // 15 分鐘 cache
 
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "d7tf2v1r01qugn0ad0m0d7tf2v1r01qugn0ad0mg";
-const TWELVE_DATA_KEY = process.env.TWELVE_DATA_KEY || "649e2910371546de92d4cf65b78895de";
 
 export interface QuoteData {
   symbol: string;
@@ -38,7 +37,6 @@ export interface IndicatorData {
   atr: number;
 }
 
-// ==================== sleep helper（節流用） ====================
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -85,7 +83,7 @@ async function fetchQuote(symbol: string): Promise<QuoteData> {
     };
 
     cache.set(cacheKey, quote, 900);
-    console.log(`[Finnhub] ✅ ${symbol}: $${price}`);
+    console.log(`[Finnhub] ✅ ${symbol}: $${price} (${(changePercent * 100).toFixed(2)}%)`);
     return quote;
 
   } catch (error) {
@@ -94,118 +92,66 @@ async function fetchQuote(symbol: string): Promise<QuoteData> {
   }
 }
 
-// ==================== fetchHistoricalData: 用 Twelve Data 獲取歷史 K 線 ====================
+// ==================== fetchHistoricalData: 用 prevClose 模擬最簡化嘅2點K線 ====================
+// 由於 Finnhub 免費版唔支援 /stock/candle，呢個函數只回傳基於 quote 嘅簡化數據
+// 用嚀計算指標嘅 fallback，並非真實歷史走勢
 async function fetchHistoricalData(
   symbol: string,
   period: string = "3mo"
 ): Promise<CandleData[]> {
-  const cacheKey = `history_${symbol}_${period}`;
-  const cached = cache.get(cacheKey) as CandleData[] | undefined;
-  if (cached) return cached;
+  const quote = await fetchQuote(symbol);
 
-  const outputsize = period === "1mo" ? 22 : period === "3mo" ? 66 : 130;
+  // 用 quote 嘅 open/high/low/close 構建單日蠟燭圖
+  // 同時用 prevClose 構建「昨日」蠟燭，畀計算 RSI/EMA 用最少2點數據
+  const prevClose = quote.price - quote.change;
 
-  try {
-    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&outputsize=${outputsize}&apikey=${TWELVE_DATA_KEY}`;
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(15000),
-    });
+  const candles: CandleData[] = [
+    {
+      date: new Date(Date.now() - 86400000).toISOString().split("T")[0],
+      open: prevClose,
+      high: prevClose,
+      low: prevClose,
+      close: prevClose,
+      volume: 0,
+    },
+    {
+      date: new Date().toISOString().split("T")[0],
+      open: quote.open,
+      high: quote.high,
+      low: quote.low,
+      close: quote.price,
+      volume: 0,
+    },
+  ];
 
-    if (!response.ok) {
-      throw new Error(`TwelveData HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
-
-    if (data.status === "error" || data.code) {
-      console.error(`[TwelveData] Error for ${symbol}:`, data.message);
-      throw new Error(`No historical data for ${symbol}: ${data.message}`);
-    }
-
-    const values = data.values || [];
-    const candles: CandleData[] = values
-      .map((v: any) => ({
-        date: v.datetime,
-        open: parseFloat(v.open),
-        high: parseFloat(v.high),
-        low: parseFloat(v.low),
-        close: parseFloat(v.close),
-        volume: parseInt(v.volume) || 0,
-      }))
-      .reverse(); // Twelve Data 由新到舊，要反轉成由舊到新
-
-    cache.set(cacheKey, candles, 900);
-    console.log(`[TwelveData] ✅ Fetched ${candles.length} candles for ${symbol}`);
-    return candles;
-
-  } catch (error) {
-    console.error(`[TwelveData] Historical error for ${symbol}:`, error);
-    throw new Error(`Failed to fetch historical data for ${symbol}`);
-  }
+  return candles;
 }
 
-// ==================== calculateIndicators ====================
+// ==================== calculateIndicators（簡化版，基於單日數據） ====================
 function calculateIndicators(candles: CandleData[]): IndicatorData {
-  if (candles.length < 20) {
+  if (candles.length < 2) {
     return { rsi: 50, ema20: 0, ema50: 0, macd: { macd: 0, signal: 0 }, atr: 0 };
   }
 
-  const closes = candles.map((c) => c.close);
-  const highs = candles.map((c) => c.high);
-  const lows = candles.map((c) => c.low);
+  const today = candles[candles.length - 1];
+  const yesterday = candles[candles.length - 2];
 
-  const rsi = calculateRSI(closes, 14);
-  const ema20 = calculateEMA(closes, 20);
-  const ema50 = calculateEMA(closes, 50);
-  const { macd, signal } = calculateMACD(closes);
-  const atr = calculateATR(highs, lows, closes, 14);
+  // 簡化 RSI：用今日漲跌幅推算（50 為中性，>50 偏多，<50 偏空）
+  const changePercent = yesterday.close > 0 ? (today.close - yesterday.close) / yesterday.close : 0;
+  const rsi = Math.max(0, Math.min(100, 50 + changePercent * 1000)); // 簡化映射
+
+  // 簡化 EMA：用今日 close 作為近似值（因為冇足夠歷史數據）
+  const ema20 = today.close;
+  const ema50 = today.close;
+
+  // 簡化 MACD：用今日漲跌幅方向判斷
+  const macd = changePercent * 100;
+  const signal = macd * 0.67;
+
+  // 簡化 ATR：用今日 high-low 範圍
+  const atr = today.high - today.low || today.close * 0.02; // fallback 2%
 
   return { rsi, ema20, ema50, macd: { macd, signal }, atr };
-}
-
-function calculateRSI(prices: number[], period: number): number {
-  if (prices.length < period + 1) return 50;
-  let gains = 0, losses = 0;
-  for (let i = prices.length - period; i < prices.length; i++) {
-    const diff = prices[i] - prices[i - 1];
-    if (diff > 0) gains += diff;
-    else losses += Math.abs(diff);
-  }
-  const avgGain = gains / period;
-  const avgLoss = losses / period;
-  if (avgLoss === 0) return avgGain > 0 ? 100 : 50;
-  return 100 - 100 / (1 + avgGain / avgLoss);
-}
-
-function calculateEMA(prices: number[], period: number): number {
-  if (prices.length < period) return prices[prices.length - 1] || 0;
-  const multiplier = 2 / (period + 1);
-  let ema = prices.slice(0, period).reduce((a, b) => a + b) / period;
-  for (let i = period; i < prices.length; i++) {
-    ema = prices[i] * multiplier + ema * (1 - multiplier);
-  }
-  return ema;
-}
-
-function calculateMACD(prices: number[]): { macd: number; signal: number } {
-  const ema12 = calculateEMA(prices, 12);
-  const ema26 = calculateEMA(prices, 26);
-  const macd = ema12 - ema26;
-  return { macd, signal: macd * 0.67 };
-}
-
-function calculateATR(highs: number[], lows: number[], closes: number[], period: number): number {
-  if (highs.length < period) return 0;
-  let trSum = 0;
-  for (let i = Math.max(1, highs.length - period); i < highs.length; i++) {
-    const tr = Math.max(
-      highs[i] - lows[i],
-      Math.abs(highs[i] - closes[i - 1]),
-      Math.abs(lows[i] - closes[i - 1])
-    );
-    trSum += tr;
-  }
-  return trSum / period;
 }
 
 export const yfinanceData = {
