@@ -67,28 +67,16 @@ export default function DashboardPage() {
   }, []);
 
   const loadData = async () => {
-    setLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    //if (!user) { router.push('/login'); return; }
-
-    // Load profile
-    const { data: profileData } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', user?.id || '')
-      .maybeSingle();
-    setProfile(profileData);
-
-    // Load signals
-    const { data: signalsData } = await supabase
-      .from('stock_signals')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(20);
-
-    setSignals(signalsData && signalsData.length > 0 ? signalsData : []);
-    setLoading(false);
-  };
+  setLoading(true);
+  setProfile({ 
+    id: 'guest', 
+    email: 'guest@local', 
+    full_name: '訪客', 
+    subscription_status: 'active' 
+  } as any);
+  setSignals([]);
+  setLoading(false);
+};
 
   const handleScan = async () => {
     setScanning(true);
