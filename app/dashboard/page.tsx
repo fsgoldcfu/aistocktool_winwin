@@ -386,16 +386,16 @@ export default function DashboardPage() {
                       <div className="px-5 py-4 grid grid-cols-3 gap-3">
                         <div>
                           <div className="text-slate-400 text-xs mb-1">入場價</div>
-                          <div className="text-white font-bold text-lg">${signal.entry_price}</div>
+                          <div className="text-white font-bold text-lg">${signal.entry_price.toFixed(2)}</div>
                         </div>
                         <div>
                           <div className="text-slate-400 text-xs mb-1">目標價</div>
-                          <div className="text-emerald-400 font-bold text-lg">${signal.target_price}</div>
+                          <div className="text-emerald-400 font-bold text-lg">${signal.target_price.toFixed(2)}</div>
                           <div className="text-emerald-400 text-xs">+{upside}%</div>
                         </div>
                         <div>
                           <div className="text-slate-400 text-xs mb-1">止蝕價</div>
-                          <div className="text-red-400 font-bold text-lg">${signal.stop_loss}</div>
+                          <div className="text-red-400 font-bold text-lg">${signal.stop_loss.toFixed(2)}</div>
                           <div className="text-red-400 text-xs">{downside}%</div>
                         </div>
                       </div>
