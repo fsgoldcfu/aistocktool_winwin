@@ -298,21 +298,36 @@ function calculateATR(candles: Candle[], period: number = 14): number {
 /**
  * Module 2: Stage 3 Bullish News Explosion and 60+ Keyword Library
  */
-function getUSStockNews(symbol: string, stockName: string): NewsItem[] {
-  // Simulate news for demonstration. In a real system, this would fetch live news.
-  const newsMap: { [key: string]: NewsItem[] } = {
-    "NVDA": [{ title: "NVIDIA announces breakthrough AI chip, guidance raised" }],
-    "ARM": [{ title: "ARM Holdings reports strong earnings, insider buy" }],
-    "COIN": [{ title: "Coinbase sees massive Bitcoin ETF inflow" }],
-    "MSTR": [{ title: "MicroStrategy acquires more Bitcoin, bullish outlook" }],
-    "GME": [{ title: "GameStop announces share repurchase program" }],
-    "LLY": [{ title: "Eli Lilly drug approved by FDA, profit surge expected" }],
-    "TSLA": [{ title: "Tesla delivers record number of vehicles, production breakthrough" }],
-    "BABA": [{ title: "Alibaba beats revenue estimates, expands AI applications" }],
-    "PLTR": [{ title: "Palantir secures major government AI contract" }],
-    "SOUN": [{ title: "SoundHound AI partners with leading auto manufacturer" }],
-  };
-  return newsMap[symbol] || [];
+async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
+  try {
+    const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "";
+    const today = new Date();
+    const from = new Date(today);
+    from.setDate(from.getDate() - 1); // 過去1天嘅新聞
+
+    const fromStr = from.toISOString().split("T")[0];
+    const toStr = today.toISOString().split("T")[0];
+
+    const url = `https://finnhub.io/api/v1/company-news?symbol=${symbol}&from=${fromStr}&to=${toStr}&token=${FINNHUB_KEY}`;
+    const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+
+    if (!response.ok) {
+      console.error(`[News] Finnhub HTTP ${response.status} for ${symbol}`);
+      return [];
+    }
+
+    const data = await response.json();
+    if (!Array.isArray(data) || data.length === 0) return [];
+
+    // 取最新3條新聞
+    return data.slice(0, 3).map((item: any) => ({
+      title: item.headline || "",
+    }));
+
+  } catch (error) {
+    console.error(`[News] Error fetching news for ${symbol}:`, error);
+    return [];
+  }
 }
 
 function hasBullishNews(news: NewsItem[]): boolean {
@@ -464,7 +479,7 @@ if (candles.length < 20) {
 }
     
     const indicators = yfinanceData.calculateIndicators(candles);
-    const news = getUSStockNews(symbol, US_STOCK_NAMES[symbol] || symbol);
+   const news = await getUSStockNews(symbol);
 
     const todayVolume = candles[candles.length - 1]?.volume || 0;
     const past5DaysVolumes = candles.slice(-6, -1).map(c => c.volume);
