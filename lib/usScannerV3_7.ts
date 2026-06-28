@@ -204,7 +204,9 @@ function getHKTimeInfo() {
   // Active session: 22:30 - 04:00 HKT
 
   // Determine if it's a trading day (simplified for now, assume always trading day)
-  const isTradingDay = true; // In a real system, check for weekends/holidays
+  const dayOfWeek = currentTime.getDay(); // 0=Sunday, 6=Saturday
+// 美股交易日對應香港時間：美股星期一至五，即香港時間星期二至六（因時差）
+const isTradingDay = dayOfWeek !== 0 && dayOfWeek !== 1; // 排除香港時間嘅日+一（對應美股週末）
 
   // Dynamic Market Phase Determination for US market based on HKT
   if (isTradingDay) {
