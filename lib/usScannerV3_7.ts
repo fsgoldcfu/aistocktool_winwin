@@ -89,7 +89,7 @@ function sleep(ms: number): Promise<void> {
 
 const CONFIG = {
   totalCapital: 100000,        // HK$100,000 total (for reference)
-  positionsCount: 3,           // Target 3 stocks
+  positionsCount: 5,           // Target 3 stocks
   capitalPerPositionMin: 6500, // $6,500 USD
   capitalPerPositionMax: 13000, // $13,000 USD
   minTargetProfitPerStock: 130, // $130 USD
