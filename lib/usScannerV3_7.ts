@@ -99,25 +99,25 @@ const CONFIG = {
 };
 
 const US_SECTORS: Record<string, string[]> = {
-  "AI半導體與算力": ["NVDA", "AMD", "ARM", "AVGO", "SMCI", "TSMC", "ASML", "MU", "QCOM", "LRCX"],
-  "科技七巨頭核心": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NFLX", "ORCL", "NOW", "PANW"],
-  "加密貨幣與Web3": ["COIN", "MSTR", "MARA", "RIOT", "CLSK", "CIFR", "WULF", "IREN", "CORZ", "HUT"],
-  "AI應用與大數據": ["PLTR", "AI", "PATH", "SOUN", "BBAI", "CXAI", "SNOW", "NET", "DDOG", "CRWD"],
-  "逆市中概狂飆股": ["BABA", "PDD", "FUTU", "JD", "NIO", "LI", "XPEV", "BIDU", "TCOM", "TAL"],
-  "美股特立獨行叛徒": ["GME", "AMC", "DJT", "HOOD", "SQ", "PYPL", "UPST", "AFRM", "SOFI", "DKNG"],
-  "高爆發醫藥生物科技": ["LLY", "NVO", "MRNA", "BIIB", "AMGN", "GILD", "REGN", "VRTX", "VKTX", "ALT"]
+  "AI半導體與算力": ["NVDA", "AMD", "AVGO", "MU", "MRVL"],
+  "科技核心巨頭": ["AAPL", "MSFT", "TSLA", "META", "AMZN"],
+  "加密貨幣與Web3": ["COIN", "MSTR", "MARA", "RIOT", "HUT"],
+  "AI應用與雲端": ["PLTR", "SNOW", "NET", "CRWD", "DDOG"],
+  "中概股": ["BABA", "PDD", "NIO", "JD", "XPEV"],
+  "美股特立獨行": ["GME", "HOOD", "SOFI", "AFRM", "DKNG"],
+  "醫藥生物科技": ["LLY", "MRNA", "NVO", "REGN", "VRTX"]
 };
 
 const US_STOCK_UNIVERSE: string[] = Array.from(new Set(Object.values(US_SECTORS).flat()));
 
 const US_STOCK_NAMES: Record<string, string> = {
-  "NVDA": "NVIDIA", "AMD": "Advanced Micro Devices", "ARM": "ARM Holdings", "AVGO": "Broadcom", "SMCI": "Super Micro Computer", "TSMC": "Taiwan Semiconductor", "ASML": "ASML Holding", "MU": "Micron Technology", "QCOM": "Qualcomm", "LRCX": "Lam Research",
-  "AAPL": "Apple", "MSFT": "Microsoft", "GOOGL": "Alphabet A", "AMZN": "Amazon", "META": "Meta Platforms", "TSLA": "Tesla", "NFLX": "Netflix", "ORCL": "Oracle", "NOW": "ServiceNow", "PANW": "Palo Alto Networks",
-  "COIN": "Coinbase Global", "MSTR": "MicroStrategy", "MARA": "Marathon Digital Holdings", "RIOT": "Riot Platforms", "CLSK": "CleanSpark", "CIFR": "Cipher Mining", "WULF": "TeraWulf", "IREN": "Iris Energy", "CORZ": "Core Scientific", "HUT": "Hut 8 Mining",
-  "PLTR": "Palantir Technologies", "AI": "C3.ai", "PATH": "UiPath", "SOUN": "SoundHound AI", "BBAI": "BigBear.ai", "CXAI": "C3.ai (CXAI)", "SNOW": "Snowflake", "NET": "Cloudflare", "DDOG": "Datadog", "CRWD": "CrowdStrike",
-  "BABA": "Alibaba Group", "PDD": "PDD Holdings", "FUTU": "Futu Holdings", "JD": "JD.com", "NIO": "NIO Inc.", "LI": "Li Auto", "XPEV": "XPeng", "BIDU": "Baidu", "TCOM": "Trip.com Group", "TAL": "TAL Education",
-  "GME": "GameStop", "AMC": "AMC Entertainment", "DJT": "Trump Media & Technology Group", "HOOD": "Robinhood Markets", "SQ": "Block Inc.", "PYPL": "PayPal Holdings", "UPST": "Upstart Holdings", "AFRM": "Affirm Holdings", "SOFI": "SoFi Technologies", "DKNG": "DraftKings",
-  "LLY": "Eli Lilly and Company", "NVO": "Novo Nordisk", "MRNA": "Moderna", "BIIB": "Biogen", "AMGN": "Amgen", "GILD": "Gilead Sciences", "REGN": "Regeneron Pharmaceuticals", "VRTX": "Vertex Pharmaceuticals", "VKTX": "Viking Therapeutics", "ALT": "Altimmune",
+  "NVDA": "NVIDIA", "AMD": "Advanced Micro Devices", "AVGO": "Broadcom", "MU": "Micron Technology", "MRVL": "Marvell Technology",
+  "AAPL": "Apple", "MSFT": "Microsoft", "TSLA": "Tesla", "META": "Meta Platforms", "AMZN": "Amazon",
+  "COIN": "Coinbase Global", "MSTR": "MicroStrategy", "MARA": "Marathon Digital", "RIOT": "Riot Platforms", "HUT": "Hut 8 Mining",
+  "PLTR": "Palantir Technologies", "SNOW": "Snowflake", "NET": "Cloudflare", "CRWD": "CrowdStrike", "DDOG": "Datadog",
+  "BABA": "Alibaba Group", "PDD": "PDD Holdings", "NIO": "NIO Inc.", "JD": "JD.com", "XPEV": "XPeng",
+  "GME": "GameStop", "HOOD": "Robinhood Markets", "SOFI": "SoFi Technologies", "AFRM": "Affirm Holdings", "DKNG": "DraftKings",
+  "LLY": "Eli Lilly and Company", "MRNA": "Moderna", "NVO": "Novo Nordisk", "REGN": "Regeneron Pharmaceuticals", "VRTX": "Vertex Pharmaceuticals",
 };
 
 const BULLISH_KEYWORDS = [
