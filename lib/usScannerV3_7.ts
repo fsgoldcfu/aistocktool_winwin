@@ -457,10 +457,9 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
     }
 
     const candles = await yfinanceData.fetchHistoricalData(symbol, "3mo");
-    if (candles.length < 20) {
-      // console.log(`[US V3.7] ${symbol}: Insufficient historical data, skipping`);
-      return null;
-    }
+if (candles.length < 2) {
+  return null;
+}
     
     const indicators = yfinanceData.calculateIndicators(candles);
     const news = getUSStockNews(symbol, US_STOCK_NAMES[symbol] || symbol);
