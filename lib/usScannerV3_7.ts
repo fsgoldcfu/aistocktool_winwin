@@ -506,10 +506,16 @@ function buildRecommendation(
 
   // Module 3: 調整 Stage 4 晚盤判定: 以香港時間為準，超過 23:30 HKT 後進入美股深夜盤，強制實施 `changePercent > 0` 限制
   if (hkTimeInfo.hkHour >= 23 && hkTimeInfo.hkMinute >= 30 || hkTimeInfo.hkHour < 4) { // After 23:30 HKT
-    if (changePercent <= 0) {
-      debugReason = `Late Session (after 23:30 HKT): Stock is not rising (changePercent: ${(changePercent * 100).toFixed(2)}%)`;
-      return { recommendation: null, debugReason };
-    }
+   if (changePercent <= 0 || changePercent <= indexChangePercent) {
+  debugReason = `Relative Strength Check Failed...`;
+  return { recommendation: null, debugReason };
+}
+
+// 防止追高：升幅超過 8% 視為過熱，跳過
+if (changePercent > 0.08) {
+  debugReason = `Overheated: Stock已升${(changePercent * 100).toFixed(1)}%，risk追高`;
+  return { recommendation: null, debugReason };
+}
   }
 
   // 核心鐵律: 短炒股票當日必須是升緊的 (拒絕接飛刀) 且強於大市
