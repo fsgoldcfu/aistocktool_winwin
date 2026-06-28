@@ -457,7 +457,7 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
     }
 
     const candles = await yfinanceData.fetchHistoricalData(symbol, "3mo");
-if (candles.length < 2) {
+if (candles.length <2) {
   return null;
 }
     
