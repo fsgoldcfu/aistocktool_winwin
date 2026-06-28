@@ -1,10 +1,12 @@
-// ==================== 數據源對接層（美股版） ====================
-// 使用 Finnhub API（免費版每分鐘 60 次請求）
+// ==================== 數據源對接層（美股版 - 混合方案） ====================
+// fetchQuote: 用 Finnhub（即時報價，免費版支援）
+// fetchHistoricalData: 用 Twelve Data（歷史K線，Finnhub免費版已不支援）
 
 const NodeCache = require("node-cache");
 const cache = new NodeCache({ stdTTL: 900 }); // 15 分鐘 cache
 
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "d7tf2v1r01qugn0ad0m0d7tf2v1r01qugn0ad0mg";
+const TWELVE_DATA_KEY = process.env.TWELVE_DATA_KEY || "649e2910371546de92d4cf65b78895de";
 
 export interface QuoteData {
   symbol: string;
@@ -41,7 +43,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ==================== fetchQuote: 獲取實時報價 ====================
+// ==================== fetchQuote: 用 Finnhub 獲取實時報價 ====================
 async function fetchQuote(symbol: string): Promise<QuoteData> {
   const cacheKey = `quote_${symbol}`;
   const cached = cache.get(cacheKey) as QuoteData | undefined;
@@ -59,7 +61,6 @@ async function fetchQuote(symbol: string): Promise<QuoteData> {
 
     const data = await response.json();
 
-    // Finnhub 欄位: c=current, o=open, h=high, l=low, pc=previous close
     if (data.c === undefined || data.c === 0) {
       console.error(`[Finnhub] No data for ${symbol}:`, JSON.stringify(data));
       throw new Error(`No price data for ${symbol}`);
@@ -78,7 +79,7 @@ async function fetchQuote(symbol: string): Promise<QuoteData> {
       open: data.o || price,
       high: data.h || price,
       low: data.l || price,
-      volume: 0, // Finnhub /quote 唔提供 volume，由 candle 數據補充
+      volume: 0,
       timestamp: Date.now(),
       status: "live",
     };
@@ -93,7 +94,7 @@ async function fetchQuote(symbol: string): Promise<QuoteData> {
   }
 }
 
-// ==================== fetchHistoricalData: 獲取歷史 K 線 ====================
+// ==================== fetchHistoricalData: 用 Twelve Data 獲取歷史 K 線 ====================
 async function fetchHistoricalData(
   symbol: string,
   period: string = "3mo"
@@ -102,42 +103,43 @@ async function fetchHistoricalData(
   const cached = cache.get(cacheKey) as CandleData[] | undefined;
   if (cached) return cached;
 
-  const days = period === "1mo" ? 30 : period === "3mo" ? 90 : 180;
-  const to = Math.floor(Date.now() / 1000);
-  const from = to - days * 24 * 60 * 60;
+  const outputsize = period === "1mo" ? 22 : period === "3mo" ? 66 : 130;
 
   try {
-    const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_KEY}`;
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&outputsize=${outputsize}&apikey=${TWELVE_DATA_KEY}`;
     const response = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
-      throw new Error(`Finnhub HTTP ${response.status}`);
+      throw new Error(`TwelveData HTTP ${response.status}`);
     }
 
     const data = await response.json();
 
-    if (data.s !== "ok" || !data.c || data.c.length === 0) {
-      console.error(`[Finnhub] No historical data for ${symbol}:`, data.s);
-      throw new Error(`No historical data for ${symbol}`);
+    if (data.status === "error" || data.code) {
+      console.error(`[TwelveData] Error for ${symbol}:`, data.message);
+      throw new Error(`No historical data for ${symbol}: ${data.message}`);
     }
 
-    const candles: CandleData[] = data.t.map((ts: number, i: number) => ({
-      date: new Date(ts * 1000).toISOString().split("T")[0],
-      open: data.o[i],
-      high: data.h[i],
-      low: data.l[i],
-      close: data.c[i],
-      volume: data.v[i],
-    }));
+    const values = data.values || [];
+    const candles: CandleData[] = values
+      .map((v: any) => ({
+        date: v.datetime,
+        open: parseFloat(v.open),
+        high: parseFloat(v.high),
+        low: parseFloat(v.low),
+        close: parseFloat(v.close),
+        volume: parseInt(v.volume) || 0,
+      }))
+      .reverse(); // Twelve Data 由新到舊，要反轉成由舊到新
 
     cache.set(cacheKey, candles, 900);
-    console.log(`[Finnhub] ✅ Fetched ${candles.length} candles for ${symbol}`);
+    console.log(`[TwelveData] ✅ Fetched ${candles.length} candles for ${symbol}`);
     return candles;
 
   } catch (error) {
-    console.error(`[Finnhub] Historical error for ${symbol}:`, error);
+    console.error(`[TwelveData] Historical error for ${symbol}:`, error);
     throw new Error(`Failed to fetch historical data for ${symbol}`);
   }
 }
