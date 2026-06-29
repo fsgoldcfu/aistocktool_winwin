@@ -34,6 +34,7 @@ interface Indicators {
 
 interface NewsItem {
   title: string;
+  url?: string;
 }
 
 class YFinanceData {
@@ -89,7 +90,7 @@ function sleep(ms: number): Promise<void> {
 
 const CONFIG = {
   totalCapital: 100000,        // HK$100,000 total (for reference)
-  positionsCount: 5,           // Target 3 stocks
+  positionsCount: 5,           // Target 5 stocks
   capitalPerPositionMin: 6500, // $6,500 USD
   capitalPerPositionMax: 13000, // $13,000 USD
   minTargetProfitPerStock: 130, // $130 USD
@@ -195,6 +196,7 @@ function getHKTimeInfo() {
   const currentTime = new Date(hktString);
   const hkHour = currentTime.getHours();
   const hkMinute = currentTime.getMinutes();
+  const hkDayOfWeek = currentTime.getDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
   const hkTimeStr = `${String(hkHour).padStart(2, '0')}:${String(hkMinute).padStart(2, '0')}`;
 
   let marketPhase = "closed";
@@ -203,10 +205,21 @@ function getHKTimeInfo() {
   // Opening hour: 21:30 - 22:30 HKT
   // Active session: 22:30 - 04:00 HKT
 
-  // Determine if it's a trading day (simplified for now, assume always trading day)
-  const dayOfWeek = currentTime.getDay(); // 0=Sunday, 6=Saturday
-// 美股交易日對應香港時間：美股星期一至五，即香港時間星期二至六（因時差）
-const isTradingDay = dayOfWeek !== 0 && dayOfWeek !== 1; // 排除香港時間嘅日+一（對應美股週末）
+  // ==================== 真實交易日檢查 ====================
+  // 美股交易日係星期一至五（美東時間）。
+  // 因為香港時間快美東12-13小時，美股嘅「星期一09:30」對應香港時間係「星期一21:30」(同一日)，
+  // 但美股「星期五16:00收市」對應香港時間「星期六04:00」。
+  // 所以喺香港時間嘅星期日全日 + 星期一00:00-09:00（仍是上週五美股收市後的延伸）+ 星期六04:00之後
+  // 都屬於美股休市時段。簡化判斷：
+  // - 香港時間星期日（0）→ 美股休市（對應美東星期六）
+  // - 香港時間星期一（1）凌晨0-9時 → 美股已收市（對應美東星期日）
+  // - 香港時間星期六（6）→ 美股只喺04:00前仲營業（對應美東星期五尾市），04:00後休市
+  const isWeekendClosed =
+    hkDayOfWeek === 0 || // 星期日全日休市
+    (hkDayOfWeek === 1 && hkHour < 9) || // 星期一凌晨（對應美東星期日）
+    (hkDayOfWeek === 6 && hkHour >= 4); // 星期六04:00後（對應美東星期五收市後）
+
+  const isTradingDay = !isWeekendClosed;
 
   // Dynamic Market Phase Determination for US market based on HKT
   if (isTradingDay) {
@@ -217,13 +230,15 @@ const isTradingDay = dayOfWeek !== 0 && dayOfWeek !== 1; // 排除香港時間�
     } else if (hkHour >= 9 && hkHour < 15) { // HKT 09:00 - 15:00, US market is closed but allow analysis
       marketPhase = "closed-analysis";
     }
+  } else {
+    marketPhase = "market-closed-weekend";
   }
 
   if (DEBUG_MODE) {
-    console.log(`[DEBUG] HKT Time: ${hkTimeStr}, Market Phase: ${marketPhase}`);
+    console.log(`[DEBUG] HKT Time: ${hkTimeStr} (Day ${hkDayOfWeek}), Market Phase: ${marketPhase}, IsTradingDay: ${isTradingDay}`);
   }
 
-  return { hkHour, hkMinute, hkTimeStr, marketPhase };
+  return { hkHour, hkMinute, hkTimeStr, marketPhase, isTradingDay };
 }
 
 /**
@@ -296,14 +311,14 @@ function calculateATR(candles: Candle[], period: number = 14): number {
 }
 
 /**
- * Module 2: Stage 3 Bullish News Explosion and 60+ Keyword Library
+ * Module 2: Stage 3 真實新聞 — 用 Finnhub /company-news endpoint
  */
 async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
   try {
     const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "";
     const today = new Date();
     const from = new Date(today);
-    from.setDate(from.getDate() - 1); // 過去1天嘅新聞
+    from.setDate(from.getDate() - 2); // 過去2天嘅新聞（涵蓋週末/假期）
 
     const fromStr = from.toISOString().split("T")[0];
     const toStr = today.toISOString().split("T")[0];
@@ -319,9 +334,9 @@ async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
     const data = await response.json();
     if (!Array.isArray(data) || data.length === 0) return [];
 
-    // 取最新3條新聞
     return data.slice(0, 3).map((item: any) => ({
       title: item.headline || "",
+      url: item.url || "",
     }));
 
   } catch (error) {
@@ -474,12 +489,13 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
     }
 
     const candles = await yfinanceData.fetchHistoricalData(symbol, "3mo");
-if (candles.length < 20) {
-  return null;
-}
+    if (candles.length < 20) {
+      // console.log(`[US V3.7] ${symbol}: Insufficient historical data, skipping`);
+      return null;
+    }
     
     const indicators = yfinanceData.calculateIndicators(candles);
-   const news = await getUSStockNews(symbol);
+    const news = await getUSStockNews(symbol);
 
     const todayVolume = candles[candles.length - 1]?.volume || 0;
     const past5DaysVolumes = candles.slice(-6, -1).map(c => c.volume);
@@ -523,21 +539,21 @@ function buildRecommendation(
 
   // Module 3: 調整 Stage 4 晚盤判定: 以香港時間為準，超過 23:30 HKT 後進入美股深夜盤，強制實施 `changePercent > 0` 限制
   if (hkTimeInfo.hkHour >= 23 && hkTimeInfo.hkMinute >= 30 || hkTimeInfo.hkHour < 4) { // After 23:30 HKT
-   if (changePercent <= 0 || changePercent <= indexChangePercent) {
-  debugReason = `Relative Strength Check Failed...`;
-  return { recommendation: null, debugReason };
-}
-
-// 防止追高：升幅超過 8% 視為過熱，跳過
-if (changePercent > 0.08) {
-  debugReason = `Overheated: Stock已升${(changePercent * 100).toFixed(1)}%，risk追高`;
-  return { recommendation: null, debugReason };
-}
+    if (changePercent <= 0) {
+      debugReason = `Late Session (after 23:30 HKT): Stock is not rising (changePercent: ${(changePercent * 100).toFixed(2)}%)`;
+      return { recommendation: null, debugReason };
+    }
   }
 
   // 核心鐵律: 短炒股票當日必須是升緊的 (拒絕接飛刀) 且強於大市
   if (changePercent <= 0 || changePercent <= indexChangePercent) {
     debugReason = `Relative Strength Check Failed: Stock change (${(changePercent * 100).toFixed(2)}%) not greater than index (${(indexChangePercent * 100).toFixed(2)}%) or not positive.`;
+    return { recommendation: null, debugReason };
+  }
+
+  // 防止追高: 升幅超過 8% 視為過熱，今日入場風險過高，跳過
+  if (changePercent > 0.08) {
+    debugReason = `Overheated: Stock已升${(changePercent * 100).toFixed(1)}%，risk追高，跳過今日推介`;
     return { recommendation: null, debugReason };
   }
 
@@ -669,7 +685,28 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
   const hkTimeInfo = getHKTimeInfo();
   
   console.log(`[US V3.7] ====== 玄金美股短炒天網 V3.7 完全體啟動 ======`);
-  console.log(`[US V3.7] 目前香港時間: ${hkTimeInfo.hkTimeStr}, 市場階段: ${hkTimeInfo.marketPhase}`);
+  console.log(`[US V3.7] 目前香港時間: ${hkTimeInfo.hkTimeStr}, 市場階段: ${hkTimeInfo.marketPhase}, 交易日: ${hkTimeInfo.isTradingDay}`);
+
+  // ==================== 非交易日（週末）直接返回空結果，唔做任何推介 ====================
+  if (!hkTimeInfo.isTradingDay) {
+    console.log(`[US V3.7] ⚠️ 今日為美股休市日（週末），不執行掃描，不產生任何推介。`);
+    const closedResult = {
+      recommendations: [],
+      scanTime: new Date().toISOString(),
+      hkTime: hkTimeInfo.hkTimeStr,
+      marketPhase: hkTimeInfo.marketPhase,
+      indexChangePercent: 0,
+      totalScanned: 0,
+      stage1Candidates: 0,
+      stage2Candidates: 0,
+      stage3Candidates: 0,
+      stage4Candidates: 0,
+      thresholdSoftenerActive: thresholdSoftenerActive,
+      marketClosedNotice: "美股今日休市（週末），請於美股交易日（香港時間星期一21:30 - 星期六04:00）再嘗試掃描。",
+    };
+    cachedScanResult = { result: closedResult, timestamp: Date.now() };
+    return closedResult;
+  }
   console.log(`[US V3.7] 單注資金範圍: $${CONFIG.capitalPerPositionMin} - $${CONFIG.capitalPerPositionMax} USD, 最低目標利潤: $${CONFIG.minTargetProfitPerStock} USD/股`);
   if (thresholdSoftenerActive) {
     console.log(`[US V3.7] ⚠️ 降維試槍開關已啟用：利潤門檻打8折，RSI放寬至>45。`);
@@ -685,7 +722,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
 
   // Step 1: Fetch all stock data in parallel (batched to avoid rate limiting)
   const stockData = new Map<string, StockData | null>();
-  const THROTTLE_DELAY_MS = 900; // 每隻股票之間延遲，確保 60 隻/分鐘 內
+  const THROTTLE_DELAY_MS = 1800; // 每隻股票之間延遲：而家多咗新聞 API 請求，加長節流避免 Rate Limit
 
   for (let i = 0; i < US_STOCK_UNIVERSE.length; i++) {
     const symbol = US_STOCK_UNIVERSE[i];
