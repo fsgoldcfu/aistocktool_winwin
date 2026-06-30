@@ -713,7 +713,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
   }
 
   // 獲取大市指數變幅 (Nasdaq Composite)
-  const nasdaqQuote = await yfinanceData.fetchQuote("^IXIC");
+  const nasdaqQuote = await yfinanceData.fetchQuote("QQQ");
   let indexChangePercent = 0;
   if (nasdaqQuote) {
     indexChangePercent = nasdaqQuote.changePercent;
