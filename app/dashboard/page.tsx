@@ -19,6 +19,7 @@ import {
   User,
   AlertTriangle,
   Star,
+  Gem,
 } from 'lucide-react';
 
 const SITE_NAME = process.env.NEXT_PUBLIC_SITE_NAME || '玄金操盤手';
@@ -50,6 +51,10 @@ interface SignalWithStages extends StockSignal {
   stage4?: { passed: boolean; label: string; detail: string };
   isFallback?: boolean;
   isNearMiss?: boolean;
+  // ===== 新增：港幣資金配置 + 逆市抗跌股標記 =====
+  capitalAllocatedHKD?: number;
+  expectedProfitHKD?: number;
+  isCounterTrend?: boolean;
 }
 
 export default function DashboardPage() {
@@ -332,11 +337,18 @@ export default function DashboardPage() {
               const downside = (((signal.stop_loss - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
               const statusInfo = STATUS_LABELS[signal.status];
 
+              // ===== 新增：港幣資金配置是否有數據 =====
+              const hasCapitalInfo =
+                typeof signal.capitalAllocatedHKD === 'number' &&
+                typeof signal.expectedProfitHKD === 'number';
+
               return (
                 <div
                   key={signal.id}
                   className={`bg-[#0d1224] border rounded-2xl overflow-hidden transition-all ${
-                    signal.isNearMiss
+                    signal.isCounterTrend
+                      ? 'border-cyan-400/40'
+                      : signal.isNearMiss
                       ? 'border-amber-500/30'
                       : signal.isFallback
                       ? 'border-blue-500/30'
@@ -352,6 +364,12 @@ export default function DashboardPage() {
                       <div>
                         <div className="text-white font-bold flex items-center gap-2">
                           {signal.stock_name}
+                          {signal.isCounterTrend && (
+                            <span className="text-xs bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded flex items-center gap-1">
+                              <Gem className="w-3 h-3" />
+                              逆市抗跌
+                            </span>
+                          )}
                           {signal.isNearMiss && (
                             <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">遺珠參考</span>
                           )}
@@ -399,6 +417,24 @@ export default function DashboardPage() {
                           <div className="text-red-400 text-xs">{downside}%</div>
                         </div>
                       </div>
+
+                      {/* ===== 新增：港幣建議投入金額 + 預期利潤 ===== */}
+                      {hasCapitalInfo && (
+                        <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+                          <div className="bg-white/5 rounded-xl px-3 py-2">
+                            <div className="text-slate-400 text-xs mb-0.5">建議投入</div>
+                            <div className="text-white font-bold text-sm">
+                              HK${signal.capitalAllocatedHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            </div>
+                          </div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2">
+                            <div className="text-slate-400 text-xs mb-0.5">預期利潤</div>
+                            <div className="text-emerald-400 font-bold text-sm">
+                              HK${signal.expectedProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                            </div>
+                          </div>
+                        </div>
+                      )}
 
                       <div className="px-5 pb-4">
                         <div className="flex items-center justify-between mb-1.5">
