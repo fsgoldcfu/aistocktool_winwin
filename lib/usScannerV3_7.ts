@@ -89,15 +89,28 @@ function sleep(ms: number): Promise<void> {
 // ============================================================
 
 const CONFIG = {
-  totalCapital: 100000,        // HK$100,000 total (for reference)
-  positionsCount: 5,           // Target 5 stocks
-  capitalPerPositionMin: 6500, // $6,500 USD
-  capitalPerPositionMax: 13000, // $13,000 USD
-  minTargetProfitPerStock: 130, // $130 USD
-  maxStopLossPercent: 3,       // Max 3% stop loss
-  minConfidence: 60,           // Minimum confidence score
-  thresholdSoftenerEnabled: false, // New: 降維試槍開關
+  // ===== 用戶實際資金配置（港幣為準）=====
+  totalCapitalHKD: 180000,        // 總本金 HK$180,000
+  maxDailyCapitalHKD: 100000,     // 每日最多用嚮交易嘅資金 HK$100,000
+  dailyProfitTargetHKD: 1000,     // 每日目標利潤 HK$1,000
+  expectedPositionsToBuy: 2,      // 5隻推介中，你預期實際會買嘅數量（1-2隻）
+  hkdToUsdRate: 7.8,              // 港幣兌美金匯率，可定期手動更新
+
+  positionsCount: 5,              // 每次推介5隻（不變）
+  maxStopLossPercent: 3,
+  minConfidence: 60,
+  thresholdSoftenerEnabled: false,
+
+  // ===== 逆市股偵測（跌市優先推介逆市股）=====
+  downMarketThreshold: -0.003,        // 納指跌幅 > 0.3% 視為跌市
+  counterTrendRelativeStrength: 0.01, // 個股強於大市 1% 先當「逆市股」
 };
+
+// 按你實際資金配置動態換算（程式內部運算用美金）
+const maxDailyCapitalUSD = CONFIG.maxDailyCapitalHKD / CONFIG.hkdToUsdRate;          // ≈ $12,820
+const capitalPerPositionUSD = maxDailyCapitalUSD / CONFIG.expectedPositionsToBuy;    // ≈ $6,410（買2隻時每隻嘅資金）
+const dailyProfitTargetUSD = CONFIG.dailyProfitTargetHKD / CONFIG.hkdToUsdRate;       // ≈ $128
+const minTargetProfitPerStockUSD = dailyProfitTargetUSD / CONFIG.expectedPositionsToBuy; // ≈ $64（每隻最低要賺嘅利潤）
 
 const US_SECTORS: Record<string, string[]> = {
   "AI半導體與算力": ["NVDA", "AMD", "AVGO", "MU", "MRVL"],
@@ -164,9 +177,13 @@ export interface V3_7Recommendation {
   newsHeadline: string;
   newsSentimentScore: number;
   
-  confidence: number;
+confidence: number;
   riskRewardRatio: number;
-  debugReason?: string; // Added for debugging
+  debugReason?: string;
+
+  capitalAllocatedHKD: number;  // 港幣顯示，方便你睇
+  expectedProfitHKD: number;    // 港幣顯示，方便你睇
+  isCounterTrend: boolean;      // 是否為「逆市抗跌股」
 }
 
 export interface ScanResult {
@@ -414,17 +431,17 @@ function validateProfitFeasibility(
 ): { feasible: boolean; sharesCanBuy: number; expectedProfit: number; capitalAllocated: number; lotSize: number; reason: string } {
   const lotSize = 1; // US stocks typically trade in 1 share increments
   // 戰術變更: 資金重新對齊，鎖定在上限 $13,000 美元
-  const capitalOptions = [CONFIG.capitalPerPositionMax];
+  const capitalOptions = [capitalPerPositionUSD];
   
   let bestShares = 0;
   let bestExpectedProfit = 0;
   let actualCapitalAllocated = 0;
   let feasibilityReason = "";
 
-  let currentMinTargetProfit = CONFIG.minTargetProfitPerStock;
+  let currentMinTargetProfit = minTargetProfitPerStockUSD;
   // 核心修正: 超過 23:30 HKT，提高預期利潤門檻
   if (hkHour >= 23 || hkHour < 4) { // Covers 23:30 HKT to 04:00 HKT
-    currentMinTargetProfit = CONFIG.minTargetProfitPerStock * 1.2; // $130 * 1.2 = $156
+    currentMinTargetProfit = minTargetProfitPerStockUSD * 1.2;
   }
 
   // 降維試槍開關: 當開關啟用時，利潤硬門檻打 8 折
@@ -575,7 +592,15 @@ function buildRecommendation(
     debugReason = `Profit Feasibility Check Failed: ${feasibilityInfo.reason}`;
     return { recommendation: null, debugReason };
   }
-        
+  const capitalAllocatedHKD = feasibilityInfo.capitalAllocated * CONFIG.hkdToUsdRate;
+  const expectedProfitHKD = feasibilityInfo.expectedProfit * CONFIG.hkdToUsdRate;
+  const isCounterTrend = indexChangePercent <= CONFIG.downMarketThreshold &&
+    (changePercent - indexChangePercent) >= CONFIG.counterTrendRelativeStrength;
+
+  if (isCounterTrend) {
+    triggerReason = "💎逆市抗跌股 | " + triggerReason;
+    confidence += 10;
+    }     
   let confidence = 50; 
   if (changePercent > 0) confidence += 5;
   if (changePercent > 0.01) confidence += 5; // 1% change
@@ -661,13 +686,14 @@ function buildRecommendation(
       newsHeadline: news.length > 0 ? news[0].title : "",
       newsSentimentScore: getNewsSentimentScore(news),
       
-      confidence,
+   confidence,
       riskRewardRatio,
       debugReason,
+
+      capitalAllocatedHKD,
+      expectedProfitHKD,
+      isCounterTrend,
     },
-    debugReason: debugReason
-  };
-}
 
 // ============================================================
 // MAIN SCANNER FUNCTION
@@ -843,10 +869,21 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     }
   }
 
-  // Final selection: top N by expected profit (or confidence if profit is similar)
+  // Final selection: 跌市優先逆市股，再按預期利潤/信心排序
+  const isDownMarket = indexChangePercent <= CONFIG.downMarketThreshold;
+  if (isDownMarket) {
+    console.log(`[US V3.7] ⚠️ 大市跌市模式啟動（納指${(indexChangePercent * 100).toFixed(2)}%），優先推介逆市抗跌股`);
+  }
+
   const finalRecommendations = recommendations
-    .sort((a, b) => b.expectedProfit - a.expectedProfit || b.confidence - a.confidence)
-    .slice(0, CONFIG.positionsCount); // Target 3 stocks
+    .sort((a, b) => {
+      if (isDownMarket) {
+        if (a.isCounterTrend && !b.isCounterTrend) return -1;
+        if (!a.isCounterTrend && b.isCounterTrend) return 1;
+      }
+      return b.expectedProfit - a.expectedProfit || b.confidence - a.confidence;
+    })
+    .slice(0, CONFIG.positionsCount);
   
   const elapsed = Date.now() - startTime;
   console.log(`[US V3.7] ====== 掃描完成: ${finalRecommendations.length} 隻美股在 ${elapsed}ms 內推薦 ======`);
