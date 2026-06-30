@@ -43,6 +43,8 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
   cancelled: { label: '已取消', color: 'text-red-400' },
 };
 
+type Market = 'US' | 'HK';
+
 // Extended StockSignal with stage information
 interface SignalWithStages extends StockSignal {
   stage1?: { passed: boolean; label: string; detail: string };
@@ -51,7 +53,7 @@ interface SignalWithStages extends StockSignal {
   stage4?: { passed: boolean; label: string; detail: string };
   isFallback?: boolean;
   isNearMiss?: boolean;
-  // ===== 新增：港幣資金配置 + 逆市抗跌股標記 =====
+  // ===== 港幣資金配置 + 逆市抗跌股標記（美股/港股共用同一套欄位） =====
   capitalAllocatedHKD?: number;
   expectedProfitHKD?: number;
   isCounterTrend?: boolean;
@@ -65,7 +67,10 @@ export default function DashboardPage() {
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanInfo, setScanInfo] = useState<{ usedSoftener: boolean; nearMissCount: number } | null>(null);
+  const [marketClosedNotice, setMarketClosedNotice] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'active' | 'closed'>('active');
+  // ===== 新增：市場切換（美股 / 港股） =====
+  const [market, setMarket] = useState<Market>('US');
 
   useEffect(() => {
     loadData();
@@ -83,13 +88,16 @@ export default function DashboardPage() {
   setLoading(false);
 };
 
-  const handleScan = async () => {
+  const handleScan = async (targetMarket: Market = market) => {
     setScanning(true);
     setScanError(null);
     setScanInfo(null);
+    setMarketClosedNotice(null);
+
+    const endpoint = targetMarket === 'HK' ? '/api/scan-hk' : '/api/scan';
 
     try {
-      const response = await fetch('/api/scan', {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'linkage', riskLevel: 'medium' })
@@ -107,6 +115,9 @@ export default function DashboardPage() {
           usedSoftener: data.usedSoftener || false,
           nearMissCount: data.nearMissCount || 0
         });
+        if (data.marketClosedNotice) {
+          setMarketClosedNotice(data.marketClosedNotice);
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Scan failed';
@@ -115,6 +126,16 @@ export default function DashboardPage() {
     } finally {
       setScanning(false);
     }
+  };
+
+  // ===== 新增：切換市場時自動清空舊推介，避免港股/美股數據混淆顯示 =====
+  const handleMarketSwitch = (targetMarket: Market) => {
+    if (targetMarket === market) return;
+    setMarket(targetMarket);
+    setSignals([]);
+    setScanInfo(null);
+    setScanError(null);
+    setMarketClosedNotice(null);
   };
 
   const handleLogout = async () => {
@@ -197,7 +218,33 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-black text-white mb-1">
             你好，{profile?.full_name || '會員'} 👋
           </h1>
-          <p className="text-slate-400 text-sm">以下是今日最新港股 AI 訊號</p>
+          <p className="text-slate-400 text-sm">
+            以下是今日最新{market === 'HK' ? '港股' : '美股'} AI 訊號
+          </p>
+        </div>
+
+        {/* ===== 新增：美股/港股市場切換 ===== */}
+        <div className="flex items-center gap-1 bg-white/5 border border-white/10 rounded-xl p-1 mb-6 w-fit">
+          <button
+            onClick={() => handleMarketSwitch('US')}
+            className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${
+              market === 'US'
+                ? 'bg-amber-400 text-[#0a0e1a]'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            🇺🇸 美股
+          </button>
+          <button
+            onClick={() => handleMarketSwitch('HK')}
+            className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${
+              market === 'HK'
+                ? 'bg-amber-400 text-[#0a0e1a]'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            🇭🇰 港股
+          </button>
         </div>
 
         {/* Stats row */}
@@ -269,6 +316,17 @@ export default function DashboardPage() {
           </div>
         )}
 
+        {/* ===== 新增：市場休市提示（港股週末/美股週末通用） ===== */}
+        {marketClosedNotice && (
+          <div className="bg-slate-500/10 border border-slate-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+            <Clock className="w-5 h-5 text-slate-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-slate-300 font-medium">市場休市</p>
+              <p className="text-slate-400 text-sm">{marketClosedNotice}</p>
+            </div>
+          </div>
+        )}
+
         {/* Scan Info */}
         {scanInfo && (scanInfo.usedSoftener || scanInfo.nearMissCount > 0) && (
           <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
@@ -309,7 +367,7 @@ export default function DashboardPage() {
           </div>
 
           <button
-            onClick={handleScan}
+            onClick={() => handleScan()}
             disabled={scanning}
             className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg transition-all ${
               scanning
@@ -318,7 +376,9 @@ export default function DashboardPage() {
             }`}
           >
             <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">{scanning ? '掃描中...' : '刷新'}</span>
+            <span className="hidden sm:inline">
+              {scanning ? '掃描中...' : `刷新${market === 'HK' ? '港股' : '美股'}`}
+            </span>
           </button>
         </div>
 
@@ -326,7 +386,7 @@ export default function DashboardPage() {
         {displaySignals.length === 0 ? (
           <div className="text-center py-16">
             <Clock className="w-12 h-12 text-slate-600 mx-auto mb-4" />
-            <p className="text-slate-400">暫時沒有訊號，請按「刷新」開始掃描</p>
+            <p className="text-slate-400">暫時沒有訊號，請按「刷新{market === 'HK' ? '港股' : '美股'}」開始掃描</p>
           </div>
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
@@ -337,10 +397,11 @@ export default function DashboardPage() {
               const downside = (((signal.stop_loss - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
               const statusInfo = STATUS_LABELS[signal.status];
 
-              // ===== 新增：港幣資金配置是否有數據 =====
               const hasCapitalInfo =
                 typeof signal.capitalAllocatedHKD === 'number' &&
                 typeof signal.expectedProfitHKD === 'number';
+
+              // 美股價格用$顯示，港股價格習慣都係用$顯示（HKD），保持一致唔額外處理貨幣符號
 
               return (
                 <div
@@ -418,7 +479,7 @@ export default function DashboardPage() {
                         </div>
                       </div>
 
-                      {/* ===== 新增：港幣建議投入金額 + 預期利潤 ===== */}
+                      {/* 港幣建議投入金額 + 預期利潤（美股/港股共用） */}
                       {hasCapitalInfo && (
                         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                           <div className="bg-white/5 rounded-xl px-3 py-2">
