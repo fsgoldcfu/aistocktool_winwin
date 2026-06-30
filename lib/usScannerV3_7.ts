@@ -11,6 +11,8 @@
  * 3. Time-Space Calibration: Forced HKT time locking and dynamic market phase adaptation for US trading hours.
  * 4. Flexible Profit Locks: Relaxed profit percentage for high-priced stocks and a 'Threshold Softener' switch.
  * 5. Sector Resonance Algorithm: Enhanced detection of sector-wide movements.
+ * 6. Counter-Trend Priority: 跌市時優先推介逆市抗跌股，避免跌市仲推介順勢股。
+ * 7. HKD-based Capital Allocation: 按用戶實際港幣資金配置（總本金/每日用資金/每日目標利潤）重新計算每注資金同利潤門檻。
  */
 
 // ==================== 真實數據源（Finnhub API） ====================
@@ -97,9 +99,9 @@ const CONFIG = {
   hkdToUsdRate: 7.8,              // 港幣兌美金匯率，可定期手動更新
 
   positionsCount: 5,              // 每次推介5隻（不變）
-  maxStopLossPercent: 3,
-  minConfidence: 60,
-  thresholdSoftenerEnabled: false,
+  maxStopLossPercent: 3,          // Max 3% stop loss
+  minConfidence: 60,              // Minimum confidence score
+  thresholdSoftenerEnabled: false, // 降維試槍開關
 
   // ===== 逆市股偵測（跌市優先推介逆市股）=====
   downMarketThreshold: -0.003,        // 納指跌幅 > 0.3% 視為跌市
@@ -108,7 +110,7 @@ const CONFIG = {
 
 // 按你實際資金配置動態換算（程式內部運算用美金）
 const maxDailyCapitalUSD = CONFIG.maxDailyCapitalHKD / CONFIG.hkdToUsdRate;          // ≈ $12,820
-const capitalPerPositionUSD = maxDailyCapitalUSD / CONFIG.expectedPositionsToBuy;    // ≈ $6,410（買2隻時每隻嘅資金）
+const capitalPerPositionUSD = maxDailyCapitalUSD / CONFIG.expectedPositionsToBuy;    // ≈ $6,410（預期買2隻時每隻嘅資金）
 const dailyProfitTargetUSD = CONFIG.dailyProfitTargetHKD / CONFIG.hkdToUsdRate;       // ≈ $128
 const minTargetProfitPerStockUSD = dailyProfitTargetUSD / CONFIG.expectedPositionsToBuy; // ≈ $64（每隻最低要賺嘅利潤）
 
@@ -177,12 +179,12 @@ export interface V3_7Recommendation {
   newsHeadline: string;
   newsSentimentScore: number;
   
-confidence: number;
+  confidence: number;
   riskRewardRatio: number;
-  debugReason?: string;
+  debugReason?: string; // Added for debugging
 
-  capitalAllocatedHKD: number;  // 港幣顯示，方便你睇
-  expectedProfitHKD: number;    // 港幣顯示，方便你睇
+  capitalAllocatedHKD: number;  // 港幣顯示，方便對照實際資金
+  expectedProfitHKD: number;    // 港幣顯示，方便對照實際利潤
   isCounterTrend: boolean;      // 是否為「逆市抗跌股」
 }
 
@@ -197,7 +199,8 @@ export interface ScanResult {
   stage2Candidates: number;
   stage3Candidates: number;
   stage4Candidates: number;
-  thresholdSoftenerActive: boolean; // New: 降維試槍開關狀態
+  thresholdSoftenerActive: boolean; // 降維試槍開關狀態
+  isDownMarket?: boolean;           // 是否為跌市模式
 }
 
 // ============================================================
@@ -223,14 +226,6 @@ function getHKTimeInfo() {
   // Active session: 22:30 - 04:00 HKT
 
   // ==================== 真實交易日檢查 ====================
-  // 美股交易日係星期一至五（美東時間）。
-  // 因為香港時間快美東12-13小時，美股嘅「星期一09:30」對應香港時間係「星期一21:30」(同一日)，
-  // 但美股「星期五16:00收市」對應香港時間「星期六04:00」。
-  // 所以喺香港時間嘅星期日全日 + 星期一00:00-09:00（仍是上週五美股收市後的延伸）+ 星期六04:00之後
-  // 都屬於美股休市時段。簡化判斷：
-  // - 香港時間星期日（0）→ 美股休市（對應美東星期六）
-  // - 香港時間星期一（1）凌晨0-9時 → 美股已收市（對應美東星期日）
-  // - 香港時間星期六（6）→ 美股只喺04:00前仲營業（對應美東星期五尾市），04:00後休市
   const isWeekendClosed =
     hkDayOfWeek === 0 || // 星期日全日休市
     (hkDayOfWeek === 1 && hkHour < 9) || // 星期一凌晨（對應美東星期日）
@@ -421,6 +416,7 @@ function calculateResistance(
 /**
  * Validate profit feasibility with flexible capital and US lot size (1 share)
  * Module 4: 放寬高價股鐵鎖與加入『降維試槍開關』
+ * 已改為按用戶實際 HKD 資金配置（capitalPerPositionUSD / minTargetProfitPerStockUSD）計算
  */
 function validateProfitFeasibility(
   currentPrice: number,
@@ -430,7 +426,7 @@ function validateProfitFeasibility(
   thresholdSoftenerActive: boolean
 ): { feasible: boolean; sharesCanBuy: number; expectedProfit: number; capitalAllocated: number; lotSize: number; reason: string } {
   const lotSize = 1; // US stocks typically trade in 1 share increments
-  // 戰術變更: 資金重新對齊，鎖定在上限 $13,000 美元
+  // 戰術變更: 資金按用戶實際每日可用資金 / 預期買入注數 計算
   const capitalOptions = [capitalPerPositionUSD];
   
   let bestShares = 0;
@@ -453,7 +449,7 @@ function validateProfitFeasibility(
     const sharesCanBuy = Math.floor(capital / currentPrice);
 
     if (sharesCanBuy === 0) {
-      feasibilityReason = `Capital (${capital} USD) insufficient to buy 1 share`;
+      feasibilityReason = `Capital (${capital.toFixed(0)} USD) insufficient to buy 1 share`;
       continue;
     }
 
@@ -501,13 +497,11 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
   try {
     const quote = await yfinanceData.fetchQuote(symbol);
     if (!quote || quote.price <= 0) {
-      // console.log(`[US V3.7] ${symbol}: No price data, skipping`);
       return null;
     }
 
     const candles = await yfinanceData.fetchHistoricalData(symbol, "3mo");
     if (candles.length < 20) {
-      // console.log(`[US V3.7] ${symbol}: Insufficient historical data, skipping`);
       return null;
     }
     
@@ -592,6 +586,8 @@ function buildRecommendation(
     debugReason = `Profit Feasibility Check Failed: ${feasibilityInfo.reason}`;
     return { recommendation: null, debugReason };
   }
+
+  // ===== 港幣顯示換算 + 逆市抗跌股判定 =====
   const capitalAllocatedHKD = feasibilityInfo.capitalAllocated * CONFIG.hkdToUsdRate;
   const expectedProfitHKD = feasibilityInfo.expectedProfit * CONFIG.hkdToUsdRate;
   const isCounterTrend = indexChangePercent <= CONFIG.downMarketThreshold &&
@@ -599,8 +595,8 @@ function buildRecommendation(
 
   if (isCounterTrend) {
     triggerReason = "💎逆市抗跌股 | " + triggerReason;
-    confidence += 10;
-    }     
+  }
+        
   let confidence = 50; 
   if (changePercent > 0) confidence += 5;
   if (changePercent > 0.01) confidence += 5; // 1% change
@@ -615,6 +611,11 @@ function buildRecommendation(
   if (indexChangePercent < 0 && changePercent > 0) {
     triggerReason = "🔥 逆市強勢美金股 | " + triggerReason;
     confidence += 15;
+  }
+
+  // 逆市抗跌股額外加分（比一般逆市加分更高，因為符合更嚴格嘅相對強度門檻）
+  if (isCounterTrend) {
+    confidence += 10;
   }
 
   // 爆量異動 (volumeSpike)
@@ -686,7 +687,7 @@ function buildRecommendation(
       newsHeadline: news.length > 0 ? news[0].title : "",
       newsSentimentScore: getNewsSentimentScore(news),
       
-   confidence,
+      confidence,
       riskRewardRatio,
       debugReason,
 
@@ -694,6 +695,9 @@ function buildRecommendation(
       expectedProfitHKD,
       isCounterTrend,
     },
+    debugReason: debugReason
+  };
+}
 
 // ============================================================
 // MAIN SCANNER FUNCTION
@@ -728,12 +732,13 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
       stage3Candidates: 0,
       stage4Candidates: 0,
       thresholdSoftenerActive: thresholdSoftenerActive,
+      isDownMarket: false,
       marketClosedNotice: "美股今日休市（週末），請於美股交易日（香港時間星期一21:30 - 星期六04:00）再嘗試掃描。",
     };
     cachedScanResult = { result: closedResult, timestamp: Date.now() };
     return closedResult;
   }
-  console.log(`[US V3.7] 單注資金範圍: $${CONFIG.capitalPerPositionMin} - $${CONFIG.capitalPerPositionMax} USD, 最低目標利潤: $${CONFIG.minTargetProfitPerStock} USD/股`);
+  console.log(`[US V3.7] 單注資金: $${capitalPerPositionUSD.toFixed(0)} USD（≈HK$${(capitalPerPositionUSD * CONFIG.hkdToUsdRate).toFixed(0)}），最低目標利潤: $${minTargetProfitPerStockUSD.toFixed(0)} USD/股（≈HK$${(minTargetProfitPerStockUSD * CONFIG.hkdToUsdRate).toFixed(0)}）`);
   if (thresholdSoftenerActive) {
     console.log(`[US V3.7] ⚠️ 降維試槍開關已啟用：利潤門檻打8折，RSI放寬至>45。`);
   }
@@ -745,6 +750,11 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     indexChangePercent = nasdaqQuote.changePercent;
   }
   console.log(`[US V3.7] 納斯達克綜合指數 (^IXIC) 今日變幅: ${(indexChangePercent * 100).toFixed(2)}%`);
+
+  const isDownMarket = indexChangePercent <= CONFIG.downMarketThreshold;
+  if (isDownMarket) {
+    console.log(`[US V3.7] ⚠️ 大市跌市模式啟動（納指${(indexChangePercent * 100).toFixed(2)}% ≤ ${(CONFIG.downMarketThreshold * 100).toFixed(2)}%），優先推介逆市抗跌股`);
+  }
 
   // Step 1: Fetch all stock data in parallel (batched to avoid rate limiting)
   const stockData = new Map<string, StockData | null>();
@@ -869,12 +879,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     }
   }
 
-  // Final selection: 跌市優先逆市股，再按預期利潤/信心排序
-  const isDownMarket = indexChangePercent <= CONFIG.downMarketThreshold;
-  if (isDownMarket) {
-    console.log(`[US V3.7] ⚠️ 大市跌市模式啟動（納指${(indexChangePercent * 100).toFixed(2)}%），優先推介逆市抗跌股`);
-  }
-
+  // Final selection: 跌市優先逆市抗跌股，再按預期利潤/信心排序
   const finalRecommendations = recommendations
     .sort((a, b) => {
       if (isDownMarket) {
@@ -883,13 +888,13 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
       }
       return b.expectedProfit - a.expectedProfit || b.confidence - a.confidence;
     })
-    .slice(0, CONFIG.positionsCount);
+    .slice(0, CONFIG.positionsCount); // Target 5 stocks
   
   const elapsed = Date.now() - startTime;
   console.log(`[US V3.7] ====== 掃描完成: ${finalRecommendations.length} 隻美股在 ${elapsed}ms 內推薦 ======`);
   
   for (const rec of finalRecommendations) {
-    console.log(`[US V3.7] → ${rec.symbol} (${rec.stockName}): 階段 ${rec.stage}, 信心 ${rec.confidence}%, TP=$${rec.takeProfitPrice.toFixed(2)}, 預期利潤=$${rec.expectedProfit.toFixed(0)} USD, 可行=${rec.profitFeasible}, 原因: ${rec.triggerReason}`);
+    console.log(`[US V3.7] → ${rec.symbol} (${rec.stockName}): 階段 ${rec.stage}, 信心 ${rec.confidence}%, TP=$${rec.takeProfitPrice.toFixed(2)}, 預期利潤=$${rec.expectedProfit.toFixed(0)} USD (HK$${rec.expectedProfitHKD.toFixed(0)}), 逆市股=${rec.isCounterTrend}, 可行=${rec.profitFeasible}, 原因: ${rec.triggerReason}`);
   }
   console.log("\n⚠️ 玄金操盤手提醒：當前戰術為【極速流】，不論是否到達 TP，香港時間 22:55 必須市價全清，絕不留戀！");
 
@@ -910,6 +915,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     stage3Candidates: stage3CandidatesCount,
     stage4Candidates: stage4CandidatesCount,
     thresholdSoftenerActive: thresholdSoftenerActive,
+    isDownMarket,
   };
 
   // 存入 Cache，15分鐘內重複請求直接返回
@@ -921,20 +927,3 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
 
 // Debugging flag
 const DEBUG_MODE = true;
-
-// Example usage (for testing, not part of the main scanner logic)
-// async function main() {
-//   const result = await runUSScannerV3_7(false); // Set to true to activate threshold softener
-//   if (result.recommendations.length > 0) {
-//     console.log("\n=== 🎯 符合「玄金每手利潤 $130 美元門檻」精選名單 ===");
-//     console.log("| Symbol | Name | Price | Change % | Stage | Reason | TP | Expected Profit | Confidence |");
-//     console.log("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
-//     result.recommendations.forEach(rec => {
-//       console.log(`| ${rec.symbol} | ${rec.stockName} | ${rec.currentPrice.toFixed(2)} | ${(rec.changePercent * 100).toFixed(2)}% | ${rec.stageLabel} | ${rec.triggerReason} | ${rec.takeProfitPrice.toFixed(2)} | $${rec.expectedProfit.toFixed(0)} USD | ${rec.confidence}% |`);
-//     });
-//   } else {
-//     console.log("\n⚠️ 今日美股震盪盤整。在單注資金限制下，無任何股票能穩健達到 $130 美元利潤門檻。今日建議觀望，不夾硬開倉！");
-//   }
-// }
-
-// main();
