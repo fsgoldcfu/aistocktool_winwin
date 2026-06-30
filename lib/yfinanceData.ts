@@ -1,6 +1,12 @@
 // ==================== 數據源對接層（美股版 - 混合方案） ====================
 // fetchQuote: 用 Finnhub（即時報價，免費版支援）
 // fetchHistoricalData: 用 Twelve Data（歷史K線，Finnhub免費版已不支援）
+//
+// 修正重點（解決 429 Rate Limit 問題）：
+// Twelve Data 免費版限制大約 8次/分鐘，35隻股票逐隻call歷史數據
+// 一定會撞rate limit。呢度加咗一個專屬嘅請求隊列，確保Twelve Data
+// 嘅call之間有足夠間隔（預設8秒一次，即每分鐘7.5次，留少少buffer），
+// 同埋撞到429時自動退避重試。
 
 const NodeCache = require("node-cache");
 const cache = new NodeCache({ stdTTL: 900 }); // 15 分鐘 cache
@@ -41,6 +47,56 @@ export interface IndicatorData {
 // ==================== sleep helper（節流用） ====================
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ==================== Twelve Data 專屬節流隊列 ====================
+// 免費版大約 8次/分鐘，呢度保守設定每次call之間至少間隔 8秒
+// （即每分鐘最多7.5次，留少少buffer避免卡邊界撞到限制）
+const TWELVE_DATA_MIN_INTERVAL_MS = 8000;
+let lastTwelveDataCallTime = 0;
+let twelveDataQueue: Promise<void> = Promise.resolve();
+
+/**
+ * 將 Twelve Data 嘅請求排隊執行，確保兩次call之間至少相隔
+ * TWELVE_DATA_MIN_INTERVAL_MS，避免撞免費版嘅429 rate limit。
+ */
+function scheduleTwelveDataCall<T>(fn: () => Promise<T>): Promise<T> {
+  const runWithThrottle = async (): Promise<T> => {
+    const now = Date.now();
+    const elapsed = now - lastTwelveDataCallTime;
+    if (elapsed < TWELVE_DATA_MIN_INTERVAL_MS) {
+      await sleep(TWELVE_DATA_MIN_INTERVAL_MS - elapsed);
+    }
+    lastTwelveDataCallTime = Date.now();
+    return fn();
+  };
+
+  // 用一條隊列串行執行，確保唔會有多個call同時插隊
+  const resultPromise = twelveDataQueue.then(runWithThrottle);
+  // 將queue更新成「等呢個call完成」，但唔理會佈成功定失敗，避免一個error擋住成條隊
+  twelveDataQueue = resultPromise.then(
+    () => undefined,
+    () => undefined
+  );
+  return resultPromise;
+}
+
+/**
+ * 帶 429 自動退避重試嘅 fetch wrapper，專門用喺 Twelve Data。
+ * 撞到429時，會等久啲先重試（指數退避），最多重試2次。
+ */
+async function fetchWithRetry429(url: string, timeoutMs: number, maxRetries: number = 2): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (response.status !== 429 || attempt >= maxRetries) {
+      return response;
+    }
+    attempt++;
+    const backoffMs = TWELVE_DATA_MIN_INTERVAL_MS * attempt; // 第一次多等8秒，第二次多等16秒
+    console.warn(`[TwelveData] ⚠️ 429 Rate Limited，第${attempt}次重試，等待${backoffMs}ms`);
+    await sleep(backoffMs);
+  }
 }
 
 // ==================== fetchQuote: 用 Finnhub 獲取實時報價 ====================
@@ -105,43 +161,44 @@ async function fetchHistoricalData(
 
   const outputsize = period === "1mo" ? 22 : period === "3mo" ? 66 : 130;
 
-  try {
-    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&outputsize=${outputsize}&apikey=${TWELVE_DATA_KEY}`;
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(15000),
-    });
+  // 用節流隊列包住實際請求，確保唔會撞 Twelve Data 嘅 rate limit
+  return scheduleTwelveDataCall(async () => {
+    try {
+      const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=1day&outputsize=${outputsize}&apikey=${TWELVE_DATA_KEY}`;
+      const response = await fetchWithRetry429(url, 15000);
 
-    if (!response.ok) {
-      throw new Error(`TwelveData HTTP ${response.status}`);
+      if (!response.ok) {
+        throw new Error(`TwelveData HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data.status === "error" || data.code) {
+        console.error(`[TwelveData] Error for ${symbol}:`, data.message);
+        throw new Error(`No historical data for ${symbol}: ${data.message}`);
+      }
+
+      const values = data.values || [];
+      const candles: CandleData[] = values
+        .map((v: any) => ({
+          date: v.datetime,
+          open: parseFloat(v.open),
+          high: parseFloat(v.high),
+          low: parseFloat(v.low),
+          close: parseFloat(v.close),
+          volume: parseInt(v.volume) || 0,
+        }))
+        .reverse(); // Twelve Data 由新到舊，要反轉成由舊到新
+
+      cache.set(cacheKey, candles, 900);
+      console.log(`[TwelveData] ✅ Fetched ${candles.length} candles for ${symbol}`);
+      return candles;
+
+    } catch (error) {
+      console.error(`[TwelveData] Historical error for ${symbol}:`, error);
+      throw new Error(`Failed to fetch historical data for ${symbol}`);
     }
-
-    const data = await response.json();
-
-    if (data.status === "error" || data.code) {
-      console.error(`[TwelveData] Error for ${symbol}:`, data.message);
-      throw new Error(`No historical data for ${symbol}: ${data.message}`);
-    }
-
-    const values = data.values || [];
-    const candles: CandleData[] = values
-      .map((v: any) => ({
-        date: v.datetime,
-        open: parseFloat(v.open),
-        high: parseFloat(v.high),
-        low: parseFloat(v.low),
-        close: parseFloat(v.close),
-        volume: parseInt(v.volume) || 0,
-      }))
-      .reverse(); // Twelve Data 由新到舊，要反轉成由舊到新
-
-    cache.set(cacheKey, candles, 900);
-    console.log(`[TwelveData] ✅ Fetched ${candles.length} candles for ${symbol}`);
-    return candles;
-
-  } catch (error) {
-    console.error(`[TwelveData] Historical error for ${symbol}:`, error);
-    throw new Error(`Failed to fetch historical data for ${symbol}`);
-  }
+  });
 }
 
 // ==================== calculateIndicators ====================
