@@ -513,17 +513,47 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     console.log(`[HK Scanner V1] ⚠️ 大市跌市模式啟動，優先推介逆市抗跌股`);
   }
 
-  // Step 1: 逐隻攞數據（節流避免撞rate limit）
+  // Step 1: 批量攞數據（盡量減少API call次數，夾返iTick 5次/分鐘嘅限制）
+  // 策略：1次批量quote + 1次批量klines = 2次API call搞掂全部25隻股票
   const stockData = new Map<string, HKStockDataBundle | null>();
-  const THROTTLE_DELAY_MS = 1200;
 
-  for (let i = 0; i < HK_STOCK_UNIVERSE.length; i++) {
-    const symbol = HK_STOCK_UNIVERSE[i];
-    const result = await analyzeHKStock(symbol);
-    stockData.set(symbol, result);
-    if (i < HK_STOCK_UNIVERSE.length - 1) {
-      await sleep(THROTTLE_DELAY_MS);
+  console.log(`[HK Scanner V1] 開始批量獲取港股數據（節省API call）...`);
+
+  // 批量報價（1次call攞晒所有stock嘅quote）
+  const batchQuotes = await hkStockData.fetchBatchQuotes(HK_STOCK_UNIVERSE);
+  console.log(`[HK Scanner V1] 批量報價完成，攞到 ${batchQuotes.size} 隻`);
+
+  // 批量歷史K線（1次call攞晒所有stock嘅klines）
+  const batchHistorical = await hkStockData.fetchBatchHistoricalData(HK_STOCK_UNIVERSE, "3mo");
+  console.log(`[HK Scanner V1] 批量K線完成，攞到 ${batchHistorical.size} 隻`);
+
+  // 組裝成 stockData map
+  for (const symbol of HK_STOCK_UNIVERSE) {
+    const normalizedCode = symbol.replace(/^0+/, "") || "0";
+    const quote = batchQuotes.get(normalizedCode) || batchQuotes.get(symbol);
+    const candles = batchHistorical.get(normalizedCode) || batchHistorical.get(symbol) || [];
+
+    if (!quote || quote.price <= 0 || candles.length < 20) {
+      stockData.set(symbol, null);
+      continue;
     }
+
+    const indicators = hkStockData.calculateIndicators(candles);
+    const todayVolume = candles[candles.length - 1]?.volume || 0;
+    const past5DaysVolumes = candles.slice(-6, -1).map((c) => c.volume);
+    const avgPast5DaysVolume = past5DaysVolumes.length > 0
+      ? past5DaysVolumes.reduce((a, b) => a + b, 0) / past5DaysVolumes.length : 1;
+    const volumeRatio = avgPast5DaysVolume > 0 ? todayVolume / avgPast5DaysVolume : 0;
+    const volumeSpike = volumeRatio > 1.3;
+
+    stockData.set(symbol, {
+      quote,
+      candles,
+      indicators,
+      news: [], // 港股新聞暫時stub
+      volumeRatio,
+      volumeSpike,
+    });
   }
 
   console.log(`[HK Scanner V1] 已獲取 ${stockData.size} 隻港股數據`);
