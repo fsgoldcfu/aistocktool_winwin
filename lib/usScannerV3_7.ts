@@ -390,8 +390,8 @@ function calculateResistance(
   const last3Days = candles.slice(-3);
   const threeDayHigh = Math.max(...last3Days.map(c => c.high));
   
-  // 戰術變更: 止盈位（TP）計算大瘦身（改為 0.5x ATR）
-  const takeProfitPrice = currentPrice + atr * 0.5; 
+ // 同 buildRecommendation 保持一致，用保守值 0.25x ATR 做 resistance 參考
+const takeProfitPrice = currentPrice + atr * 0.25;
   
   const candidates: Array<{ level: number; source: string }> = [];
   
@@ -574,10 +574,19 @@ function buildRecommendation(
 
   const { resistanceLevel, source: resistanceSource } = calculateResistance(candles, currentPrice, indicators.atr);
   
-  // 戰術變更: 止盈位（TP）計算大瘦身（改為 0.5x ATR）
-  let takeProfitPrice = currentPrice + indicators.atr * 0.5;
+  // 動態止盈：按大市強弱調整 ATR 倍數
+// 強市（納指升>0.5%）用大啲目標，弱市用細啲目標（提高命中率）
+let atrMultiplier: number;
+if (indexChangePercent > 0.005) {
+  atrMultiplier = 0.4;  // 強市：目標大啲
+} else if (indexChangePercent >= 0) {
+  atrMultiplier = 0.25; // 平穩市：中等目標
+} else {
+  atrMultiplier = 0.15; // 弱市/逆市：細目標優先命中
+}
+let takeProfitPrice = currentPrice + indicators.atr * atrMultiplier;
   
-  const stopLossDistance = Math.max(indicators.atr * 0.7, currentPrice * 0.02); 
+const stopLossDistance = Math.max(indicators.atr * 0.5, currentPrice * 0.015);
   const stopLossPrice = currentPrice - stopLossDistance;
   
   const feasibilityInfo = validateProfitFeasibility(currentPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive);
