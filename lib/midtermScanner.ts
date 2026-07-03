@@ -33,37 +33,50 @@ function sleep(ms: number): Promise<void> {
 // ==================== 股票池 ====================
 // 中短線用嘅股票池，比短炒更廣，涵蓋更多板塊
 const MIDTERM_SECTORS: Record<string, string[]> = {
-  "AI半導體": ["NVDA", "AMD", "AVGO", "MU", "MRVL", "QCOM", "AMAT", "LRCX"],
-  "科技巨頭": ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA"],
-  "AI應用與雲端": ["PLTR", "SNOW", "NET", "CRWD", "DDOG", "ZS", "MDB", "HUBS"],
-  "加密與金融科技": ["COIN", "MSTR", "HOOD", "SQ", "PYPL"],
-  "生物醫藥": ["LLY", "MRNA", "NVO", "REGN", "VRTX", "GILD", "BIIB"],
-  "中概股": ["BABA", "PDD", "BIDU", "NIO", "XPEV", "LI"],
-  "消費與零售": ["AMZN", "COST", "TGT", "WMT"],
-  "能源與材料": ["XOM", "CVX", "FCX", "NEM"],
+  // AI半導體（加入ARM、INTC、LRCX — 分析師6月大幅升級）
+  "AI半導體": ["NVDA", "AMD", "AVGO", "MU", "MRVL", "ARM", "INTC", "QCOM", "AMAT", "LRCX"],
+  // 科技巨頭
+  "科技巨頭": ["AAPL", "MSFT", "GOOGL", "META", "AMZN", "TSLA", "IBM"],
+  // AI應用與雲端安全（加入CRM、SNPS、PANW）
+  "AI應用與雲端": ["PLTR", "NET", "CRWD", "DDOG", "ZS", "CRM", "SNPS", "PANW", "MDB"],
+  // 加密與金融科技（移除HOOD，加入AXP、UBER）
+  "加密與金融科技": ["COIN", "MSTR", "SQ", "PYPL", "AXP", "UBER"],
+  // 生物醫藥（加入ARGX、IONS — 目標升幅最大）
+  "生物醫藥": ["LLY", "MRNA", "NVO", "REGN", "VRTX", "ARGX", "IONS", "GILD"],
+  // 中概股
+  "中概股": ["BABA", "PDD", "BIDU", "NIO", "XPEV"],
+  // 國防與能源基建（新板塊）
+  "國防與能源基建": ["RTX", "GD", "VRT", "XOM", "CVX"],
 };
 
 const MIDTERM_UNIVERSE: string[] = Array.from(new Set(Object.values(MIDTERM_SECTORS).flat()));
 
 const MIDTERM_STOCK_NAMES: Record<string, string> = {
+  // AI半導體
   "NVDA": "NVIDIA", "AMD": "Advanced Micro Devices", "AVGO": "Broadcom",
-  "MU": "Micron Technology", "MRVL": "Marvell Technology", "QCOM": "Qualcomm",
+  "MU": "Micron Technology", "MRVL": "Marvell Technology",
+  "ARM": "Arm Holdings", "INTC": "Intel", "QCOM": "Qualcomm",
   "AMAT": "Applied Materials", "LRCX": "Lam Research",
+  // 科技巨頭
   "AAPL": "Apple", "MSFT": "Microsoft", "GOOGL": "Alphabet",
-  "META": "Meta Platforms", "AMZN": "Amazon", "TSLA": "Tesla",
-  "PLTR": "Palantir", "SNOW": "Snowflake", "NET": "Cloudflare",
-  "CRWD": "CrowdStrike", "DDOG": "Datadog", "ZS": "Zscaler",
-  "MDB": "MongoDB", "HUBS": "HubSpot",
-  "COIN": "Coinbase", "MSTR": "MicroStrategy", "HOOD": "Robinhood",
-  "SQ": "Block", "PYPL": "PayPal",
+  "META": "Meta Platforms", "AMZN": "Amazon", "TSLA": "Tesla", "IBM": "IBM",
+  // AI應用與雲端
+  "PLTR": "Palantir", "NET": "Cloudflare", "CRWD": "CrowdStrike",
+  "DDOG": "Datadog", "ZS": "Zscaler", "CRM": "Salesforce",
+  "SNPS": "Synopsys", "PANW": "Palo Alto Networks", "MDB": "MongoDB",
+  // 加密與金融科技
+  "COIN": "Coinbase", "MSTR": "MicroStrategy", "SQ": "Block",
+  "PYPL": "PayPal", "AXP": "American Express", "UBER": "Uber Technologies",
+  // 生物醫藥
   "LLY": "Eli Lilly", "MRNA": "Moderna", "NVO": "Novo Nordisk",
-  "REGN": "Regeneron", "VRTX": "Vertex", "GILD": "Gilead",
-  "BIIB": "Biogen",
+  "REGN": "Regeneron", "VRTX": "Vertex", "ARGX": "argenx",
+  "IONS": "Ionis Pharmaceuticals", "GILD": "Gilead",
+  // 中概股
   "BABA": "Alibaba", "PDD": "PDD Holdings", "BIDU": "Baidu",
-  "NIO": "NIO", "XPEV": "XPeng", "LI": "Li Auto",
-  "COST": "Costco", "TGT": "Target", "WMT": "Walmart",
-  "XOM": "ExxonMobil", "CVX": "Chevron", "FCX": "Freeport-McMoRan",
-  "NEM": "Newmont",
+  "NIO": "NIO", "XPEV": "XPeng",
+  // 國防與能源基建
+  "RTX": "RTX Corporation", "GD": "General Dynamics",
+  "VRT": "Vertiv Holdings", "XOM": "ExxonMobil", "CVX": "Chevron",
 };
 
 // ==================== 觸發條件類型 ====================
