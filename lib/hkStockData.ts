@@ -152,41 +152,51 @@ class HKStockData {
   }
 
   /**
-   * 批量即時報價：一次過攞晒成個股票池嘅報價（1次API call）
-   * Scanner 主要入口，唔好逐隻call fetchQuote
+   * 批量即時報價：分批call，每批最多5隻（iTick免費版限制）
+   * Scanner 主要入口
    */
   async fetchBatchQuotes(symbols: string[]): Promise<Map<string, Quote>> {
     const result = new Map<string, Quote>();
     const codes = symbols.map((s) => this.normalizeSymbol(s));
+    const BATCH_SIZE = 5; // iTick免費版每次最多5隻
 
-    return scheduleITickCall(async () => {
-      try {
-        const url = `${ITICK_BASE_URL}/stock/quotes?region=${ITICK_REGION}&codes=${codes.join(",")}`;
-        const response = await fetchWithRetry429ITick(url, this.getHeaders(), 15000);
-        if (!response.ok) { console.error(`[HK Stock Data] fetchBatchQuotes HTTP ${response.status}`); return result; }
-        const json = await response.json();
-        if (json.code !== 0 || !json.data) { console.error(`[HK Stock Data] fetchBatchQuotes failed: ${json.msg}`); return result; }
+    const batches: string[][] = [];
+    for (let i = 0; i < codes.length; i += BATCH_SIZE) {
+      batches.push(codes.slice(i, i + BATCH_SIZE));
+    }
+    console.log(`[HK Stock Data] 分${batches.length}批攞報價，每批最多${BATCH_SIZE}隻`);
 
-        const entries = Array.isArray(json.data)
-          ? json.data.map((d: any) => [d.s || d.code, d])
-          : Object.entries(json.data);
-
-        for (const [code, d] of entries as [string, any][]) {
-          const price = Number(d.ld) || 0;
-          const open = Number(d.o) || price;
-          const change = price - open;
-          const changePercent = open > 0 ? change / open : 0;
-          const quote = { price, change, changePercent };
-          result.set(String(code), quote);
-          quoteCache.set(String(code), { data: quote, timestamp: Date.now() });
+    for (const batch of batches) {
+      await scheduleITickCall(async () => {
+        try {
+          const url = `${ITICK_BASE_URL}/stock/quotes?region=${ITICK_REGION}&codes=${batch.join(",")}`;
+          const response = await fetchWithRetry429ITick(url, this.getHeaders(), 15000);
+          if (!response.ok) { console.error(`[HK Stock Data] fetchBatchQuotes HTTP ${response.status}`); return; }
+          const json = await response.json();
+          if (json.code !== 0 || !json.data) {
+            console.error(`[HK Stock Data] fetchBatchQuotes failed: ${json.msg}`);
+            return;
+          }
+          const entries = Array.isArray(json.data)
+            ? json.data.map((d: any) => [d.s || d.code, d])
+            : Object.entries(json.data);
+          for (const [code, d] of entries as [string, any][]) {
+            const price = Number(d.ld) || 0;
+            const open = Number(d.o) || price;
+            const change = price - open;
+            const changePercent = open > 0 ? change / open : 0;
+            const quote = { price, change, changePercent };
+            result.set(String(code), quote);
+            quoteCache.set(String(code), { data: quote, timestamp: Date.now() });
+          }
+          console.log(`[HK Stock Data] ✅ 批次完成，累計 ${result.size} 隻`);
+        } catch (error) {
+          console.error(`[HK Stock Data] fetchBatchQuotes batch error:`, error);
         }
-        console.log(`[HK Stock Data] ✅ 批量報價攞到 ${result.size} 隻股票`);
-        return result;
-      } catch (error) {
-        console.error(`[HK Stock Data] fetchBatchQuotes error:`, error);
-        return result;
-      }
-    });
+      });
+    }
+    console.log(`[HK Stock Data] ✅ 批量報價全部完成，共 ${result.size} 隻`);
+    return result;
   }
 
   /** 單一股票歷史K線（fallback用） */
