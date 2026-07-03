@@ -115,25 +115,51 @@ const dailyProfitTargetUSD = CONFIG.dailyProfitTargetHKD / CONFIG.hkdToUsdRate; 
 const minTargetProfitPerStockUSD = dailyProfitTargetUSD / CONFIG.expectedPositionsToBuy; // ≈ $64（每隻最低要賺嘅利潤）
 
 const US_SECTORS: Record<string, string[]> = {
-  "AI半導體與算力": ["NVDA", "AMD", "AVGO", "MU", "MRVL"],
-  "科技核心巨頭": ["AAPL", "MSFT", "TSLA", "META", "AMZN"],
-  "加密貨幣與Web3": ["COIN", "MSTR", "MARA", "RIOT", "HUT"],
-  "AI應用與雲端": ["PLTR", "SNOW", "NET", "CRWD", "DDOG"],
-  "中概股": ["BABA", "PDD", "NIO", "JD", "XPEV"],
-  "美股特立獨行": ["GME", "HOOD", "SOFI", "AFRM", "DKNG"],
-  "醫藥生物科技": ["LLY", "MRNA", "NVO", "REGN", "VRTX"]
+  // AI半導體與算力（加入ARM、INTC、QCOM、AMAT — 分析師6月大幅升級）
+  "AI半導體與算力": ["NVDA", "AMD", "AVGO", "MU", "MRVL", "ARM", "INTC", "QCOM", "AMAT"],
+  // 科技核心巨頭
+  "科技核心巨頭": ["AAPL", "MSFT", "TSLA", "META", "AMZN", "IBM"],
+  // 加密貨幣（移除MARA/RIOT/HUT活躍度低，保留COIN/MSTR）
+  "加密貨幣與Web3": ["COIN", "MSTR"],
+  // AI應用與雲端安全（加入CRM、SNPS、ZS、PANW — 分析師升級）
+  "AI應用與雲端": ["PLTR", "NET", "CRWD", "DDOG", "CRM", "SNPS", "ZS", "PANW"],
+  // 中概股（移除JD，保留核心）
+  "中概股": ["BABA", "PDD", "NIO", "XPEV"],
+  // 消費與金融科技（加入UBER、AXP — 分析師升級；移除GME）
+  "消費與金融科技": ["SOFI", "AFRM", "DKNG", "UBER", "AXP"],
+  // 醫藥生物科技（加入ARGX、IONS — 分析師目標+40%/+72%）
+  "醫藥生物科技": ["LLY", "MRNA", "NVO", "REGN", "VRTX", "ARGX", "IONS"],
+  // 國防與能源基建（新板塊 — RTX/GD分析師升級）
+  "國防與能源基建": ["RTX", "GD", "VRT"],
 };
 
 const US_STOCK_UNIVERSE: string[] = Array.from(new Set(Object.values(US_SECTORS).flat()));
 
 const US_STOCK_NAMES: Record<string, string> = {
-  "NVDA": "NVIDIA", "AMD": "Advanced Micro Devices", "AVGO": "Broadcom", "MU": "Micron Technology", "MRVL": "Marvell Technology",
-  "AAPL": "Apple", "MSFT": "Microsoft", "TSLA": "Tesla", "META": "Meta Platforms", "AMZN": "Amazon",
-  "COIN": "Coinbase Global", "MSTR": "MicroStrategy", "MARA": "Marathon Digital", "RIOT": "Riot Platforms", "HUT": "Hut 8 Mining",
-  "PLTR": "Palantir Technologies", "SNOW": "Snowflake", "NET": "Cloudflare", "CRWD": "CrowdStrike", "DDOG": "Datadog",
-  "BABA": "Alibaba Group", "PDD": "PDD Holdings", "NIO": "NIO Inc.", "JD": "JD.com", "XPEV": "XPeng",
-  "GME": "GameStop", "HOOD": "Robinhood Markets", "SOFI": "SoFi Technologies", "AFRM": "Affirm Holdings", "DKNG": "DraftKings",
-  "LLY": "Eli Lilly and Company", "MRNA": "Moderna", "NVO": "Novo Nordisk", "REGN": "Regeneron Pharmaceuticals", "VRTX": "Vertex Pharmaceuticals",
+  // AI半導體
+  "NVDA": "NVIDIA", "AMD": "Advanced Micro Devices", "AVGO": "Broadcom",
+  "MU": "Micron Technology", "MRVL": "Marvell Technology",
+  "ARM": "Arm Holdings", "INTC": "Intel", "QCOM": "Qualcomm", "AMAT": "Applied Materials",
+  // 科技巨頭
+  "AAPL": "Apple", "MSFT": "Microsoft", "TSLA": "Tesla",
+  "META": "Meta Platforms", "AMZN": "Amazon", "IBM": "IBM",
+  // 加密
+  "COIN": "Coinbase Global", "MSTR": "MicroStrategy",
+  // AI應用與雲端
+  "PLTR": "Palantir Technologies", "NET": "Cloudflare",
+  "CRWD": "CrowdStrike", "DDOG": "Datadog",
+  "CRM": "Salesforce", "SNPS": "Synopsys", "ZS": "Zscaler", "PANW": "Palo Alto Networks",
+  // 中概股
+  "BABA": "Alibaba Group", "PDD": "PDD Holdings", "NIO": "NIO Inc.", "XPEV": "XPeng",
+  // 消費與金融科技
+  "SOFI": "SoFi Technologies", "AFRM": "Affirm Holdings",
+  "DKNG": "DraftKings", "UBER": "Uber Technologies", "AXP": "American Express",
+  // 醫藥生物科技
+  "LLY": "Eli Lilly", "MRNA": "Moderna", "NVO": "Novo Nordisk",
+  "REGN": "Regeneron Pharmaceuticals", "VRTX": "Vertex Pharmaceuticals",
+  "ARGX": "argenx", "IONS": "Ionis Pharmaceuticals",
+  // 國防與能源基建
+  "RTX": "RTX Corporation", "GD": "General Dynamics", "VRT": "Vertiv Holdings",
 };
 
 const BULLISH_KEYWORDS = [
@@ -390,8 +416,8 @@ function calculateResistance(
   const last3Days = candles.slice(-3);
   const threeDayHigh = Math.max(...last3Days.map(c => c.high));
   
- // 同 buildRecommendation 保持一致，用保守值 0.25x ATR 做 resistance 參考
-const takeProfitPrice = currentPrice + atr * 0.25;
+  // 戰術變更: 止盈位（TP）計算大瘦身（改為 0.5x ATR）
+  const takeProfitPrice = currentPrice + atr * 0.5; 
   
   const candidates: Array<{ level: number; source: string }> = [];
   
@@ -574,19 +600,10 @@ function buildRecommendation(
 
   const { resistanceLevel, source: resistanceSource } = calculateResistance(candles, currentPrice, indicators.atr);
   
-  // 動態止盈：按大市強弱調整 ATR 倍數
-// 強市（納指升>0.5%）用大啲目標，弱市用細啲目標（提高命中率）
-let atrMultiplier: number;
-if (indexChangePercent > 0.005) {
-  atrMultiplier = 0.4;  // 強市：目標大啲
-} else if (indexChangePercent >= 0) {
-  atrMultiplier = 0.25; // 平穩市：中等目標
-} else {
-  atrMultiplier = 0.15; // 弱市/逆市：細目標優先命中
-}
-let takeProfitPrice = currentPrice + indicators.atr * atrMultiplier;
+  // 戰術變更: 止盈位（TP）計算大瘦身（改為 0.5x ATR）
+  let takeProfitPrice = currentPrice + indicators.atr * 0.5;
   
-const stopLossDistance = Math.max(indicators.atr * 0.5, currentPrice * 0.015);
+  const stopLossDistance = Math.max(indicators.atr * 0.7, currentPrice * 0.02); 
   const stopLossPrice = currentPrice - stopLossDistance;
   
   const feasibilityInfo = validateProfitFeasibility(currentPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive);
