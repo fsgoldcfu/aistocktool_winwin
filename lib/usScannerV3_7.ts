@@ -349,6 +349,186 @@ function calculateATR(candles: Candle[], period: number = 14): number {
 }
 
 /**
+ * Minervini 技術指標評分函數
+ * 短炒用「加分制」，唔係硬性過濾，符合條件加分，唔符合唔扣分
+ *
+ * 條件一覽：
+ * 1. 股價 > $5（基本條件）
+ * 2. 股價不低於20日最低位（確認支撐）
+ * 3. 3個月回報 ≥ 20%（強勢股動力）
+ * 4. 每日成交金額50日均 > $500萬（流動性足夠）
+ * 5. Average daily range > 3.5%（足夠波動）
+ * 6. 不高於200日線60%（未過熱）
+ * 7. 接近10/20/50日EMA（低風險入場位）
+ * 8+9. VCP整固：5-40日，range < 8%（即將爆發形態）
+ */
+function calculateMinerviniScore(
+  currentPrice: number,
+  closes: number[],
+  highs: number[],
+  lows: number[],
+  volumes: number[],
+  ema20: number
+): { score: number; tags: string[] } {
+  // ===== Minervini VCP 加分制（總分上限100分）=====
+  // 分數按你嘅加權設定：
+  //   3個月回報 ≥20%     → 20分（最重要，動力確認）
+  //   整固Range <8%      → 15分（VCP收窄確認）
+  //   ADR >3.5%          → 15分（足夠波動）
+  //   股價不低於20日低位  → 10分（支撐確認）
+  //   成交額 >500萬       → 10分（流動性）
+  //   接近EMA10/20/50    → 10分（低風險入場位，三條各佔）
+  //   整固5-40日          → 10分（整固時間）
+  //   股價 > $5           → 5分（基本條件）
+  //   不高於200MA 60%    → 5分（唔係過熱）
+  // 總分上限：100分
+
+  let score = 0;
+  const tags: string[] = [];
+
+  // ① 股價 > $5（5分）
+  if (currentPrice > 5) {
+    score += 5;
+    tags.push("P>$5");
+  }
+
+  // ② 股價不低於20日最低位（10分）
+  if (lows.length >= 20) {
+    const twentyDayLow = Math.min(...lows.slice(-20));
+    if (currentPrice >= twentyDayLow) {
+      score += 10;
+      tags.push("AboveLow20");
+    }
+  }
+
+  // ③ 3個月回報 ≥ 20%（20分，係最重嘅條件）
+  if (closes.length >= 63) {
+    const threeMonthReturn = (currentPrice - closes[closes.length - 63]) / closes[closes.length - 63];
+    if (threeMonthReturn >= 0.20) {
+      score += 20;
+      tags.push(`3M+${(threeMonthReturn * 100).toFixed(0)}%`);
+    } else if (threeMonthReturn >= 0.10) {
+      score += 8; // 10-20%之間部分加分
+    }
+  }
+
+  // ④ 每日成交金額50日均 > $500萬美元（10分）
+  if (closes.length >= 50 && volumes.length >= 50) {
+    const last50Closes = closes.slice(-50);
+    const last50Volumes = volumes.slice(-50);
+    const avgDollarVolume = last50Closes.reduce((sum, c, i) => sum + c * (last50Volumes[i] || 0), 0) / 50;
+    if (avgDollarVolume >= 5000000) {
+      score += 10;
+      tags.push("Vol$OK");
+    }
+  }
+
+  // ⑤ Average daily range > 3.5%（15分）
+  if (closes.length >= 20 && highs.length >= 20 && lows.length >= 20) {
+    const last20Highs = highs.slice(-20);
+    const last20Lows = lows.slice(-20);
+    const last20Closes = closes.slice(-20);
+    const avgDailyRange = last20Highs.reduce((sum, h, i) => {
+      return sum + (h - last20Lows[i]) / (last20Closes[i] || 1);
+    }, 0) / 20;
+    if (avgDailyRange >= 0.035) {
+      score += 15;
+      tags.push(`ADR${(avgDailyRange * 100).toFixed(1)}%`);
+    } else if (avgDailyRange >= 0.02) {
+      score += 5; // 2-3.5%之間部分加分
+    }
+  }
+
+  // ⑥ 不高於200日線60%（5分）
+  if (closes.length >= 200) {
+    const sma200 = closes.slice(-200).reduce((a, b) => a + b, 0) / 200;
+    const distanceFromMA200 = (currentPrice - sma200) / sma200;
+    if (distanceFromMA200 <= 0.60) {
+      score += 5;
+      tags.push(`MA200+${(distanceFromMA200 * 100).toFixed(0)}%`);
+    }
+  } else if (closes.length >= 100) {
+    // 數據唔夠200日，用SMA100近似，分數打折
+    const sma100 = closes.slice(-100).reduce((a, b) => a + b, 0) / 100;
+    if ((currentPrice - sma100) / sma100 <= 0.50) {
+      score += 2;
+    }
+  }
+
+  // ⑦ 接近EMA10/20/50（合共10分，三條各約3-4分）
+  if (closes.length >= 50) {
+    const ema10 = calculateEMA(closes, 10);
+    const ema50 = calculateEMA(closes, 50);
+
+    const distEMA10 = Math.abs(currentPrice - ema10) / ema10;
+    const distEMA20 = Math.abs(currentPrice - ema20) / ema20;
+    const distEMA50 = Math.abs(currentPrice - ema50) / ema50;
+
+    // 各EMA：股價喺EMA上方且距離 < 3% 得滿分，3-6%得半分
+    if (currentPrice >= ema10 && distEMA10 <= 0.03) { score += 4; tags.push("EMA10✓"); }
+    else if (currentPrice >= ema10 && distEMA10 <= 0.06) { score += 2; }
+
+    if (currentPrice >= ema20 && distEMA20 <= 0.03) { score += 3; tags.push("EMA20✓"); }
+    else if (currentPrice >= ema20 && distEMA20 <= 0.06) { score += 1; }
+
+    if (currentPrice >= ema50 && distEMA50 <= 0.05) { score += 3; tags.push("EMA50✓"); }
+    else if (currentPrice >= ema50 && distEMA50 <= 0.08) { score += 1; }
+  }
+
+  // ⑧ 整固5-40日（10分）+ ⑨ 整固Range <8%（15分）
+  // 兩個條件綁在一起：搵出最佳整固窗口
+  if (closes.length >= 40 && highs.length >= 40 && lows.length >= 40) {
+    let bestConsolidationDays = 0;
+    let bestRange = 1;
+    let hasVolumeContraction = false;
+
+    for (let days = 5; days <= 40; days++) {
+      const windowHighs = highs.slice(-days);
+      const windowLows = lows.slice(-days);
+      const windowVolumes = volumes.slice(-days);
+
+      const periodHigh = Math.max(...windowHighs);
+      const periodLow = Math.min(...windowLows);
+      const range = (periodHigh - periodLow) / periodLow;
+
+      if (range < 0.08) {
+        if (days > bestConsolidationDays) {
+          bestConsolidationDays = days;
+          bestRange = range;
+        }
+        // 檢查成交量收縮（VCP最強確認）
+        if (windowVolumes.length >= 10) {
+          const recentAvgVol = windowVolumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
+          const priorAvgVol = windowVolumes.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
+          if (priorAvgVol > 0 && recentAvgVol < priorAvgVol * 1.1) {
+            hasVolumeContraction = true;
+          }
+        }
+      }
+    }
+
+    if (bestConsolidationDays >= 5) {
+      // ⑧ 整固5-40日：10分
+      score += 10;
+      tags.push(`Consol${bestConsolidationDays}d`);
+
+      // ⑨ 整固Range <8%：15分（已確認因為 range < 0.08）
+      score += 15;
+      tags.push(`Range${(bestRange * 100).toFixed(1)}%`);
+
+      // 額外：成交量收縮（VCP完整形態）再加5分
+      if (hasVolumeContraction) {
+        score += 5;
+        tags.push("VCP✓");
+      }
+    }
+  }
+
+  // 上限100分，但唔影響原本confidence（原本confidence有自己嘅上限處理）
+  return { score: Math.min(score, 100), tags };
+}
+
+/**
  * Module 2: Stage 3 真實新聞 — 用 Finnhub /company-news endpoint
  */
 async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
@@ -669,6 +849,19 @@ function buildRecommendation(
       debugReason = `Threshold Softener Active: RSI (${indicators.rsi.toFixed(0)}) not above 45.`;
       return { recommendation: null, debugReason };
     }
+  }
+
+  // ===== Minervini 技術指標加分（唔係過濾，符合加分，唔符合唔扣分）=====
+  // closes 已喺上面宣告，直接用；highs/lows/volumes 新增
+  const mHighs = candles.map((c: any) => c.high).filter((h: number) => h > 0);
+  const mLows = candles.map((c: any) => c.low).filter((l: number) => l > 0);
+  const mVolumes = candles.map((c: any) => c.volume).filter((v: number) => v > 0);
+  const minerviniBonus = calculateMinerviniScore(
+    currentPrice, closes, mHighs, mLows, mVolumes, indicators.ema20
+  );
+  confidence += minerviniBonus.score;
+  if (minerviniBonus.score > 0) {
+    triggerReason += ` | 📐 Minervini+${minerviniBonus.score}(${minerviniBonus.tags.join(",")})`;
   }
 
   confidence = Math.max(0, Math.min(100, confidence));
