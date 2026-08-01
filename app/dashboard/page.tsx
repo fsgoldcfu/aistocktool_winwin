@@ -7,14 +7,14 @@ import { supabase, type StockSignal, type Profile } from '@/lib/supabase';
 import {
   TrendingUp, TrendingDown, LogOut, Crown, Zap, Clock,
   BarChart2, RefreshCw, Lock, ChevronRight, User,
-  AlertTriangle, Star, Gem, Target, Calendar,
+  AlertTriangle, Star, Gem, Target, Calendar, Activity,
 } from 'lucide-react';
 
 const SITE_NAME = process.env.NEXT_PUBLIC_SITE_NAME || '玄金操盤手';
 const MONTHLY_PRICE = process.env.NEXT_PUBLIC_MONTHLY_PRICE || '388';
 
 type Market = 'US' | 'HK';
-type Mode = 'shortterm' | 'midterm';
+type Mode = 'shortterm' | 'midterm' | 'indices';
 
 // ==================== 短炒 Signal ====================
 const SIGNAL_TYPE_LABELS: Record<string, { label: string; color: string; bg: string }> = {
@@ -96,6 +96,39 @@ const TRIGGER_COLORS: Record<string, { border: string; badge: string; text: stri
   },
 };
 
+// ==================== 指數 / 槓桿ETF ====================
+interface IndexResult {
+  symbol: string;
+  name: string;
+  direction: 'long' | 'short';
+  latestClose: number;
+  latestDate: string;
+  trend: 'strong' | 'neutral' | 'weak';
+  supportLevels: { avg: number; touches: number }[];
+  resistanceLevels: { avg: number; touches: number }[];
+  indicators: {
+    sma20: number;
+    sma50: number;
+    sma200: number;
+    atr14: number;
+    avgVolume20: number;
+    latestVolume: number;
+    volumeSpikeRatio: number | null;
+  };
+  recommendation: {
+    action: string;
+    nextBuyPrice: number;
+    nextSellPrice: number;
+    basis: string;
+  };
+}
+
+const TREND_LABELS: Record<string, { label: string; color: string }> = {
+  strong: { label: '強勢', color: 'text-emerald-400' },
+  neutral: { label: '中性', color: 'text-amber-400' },
+  weak: { label: '弱勢', color: 'text-red-400' },
+};
+
 // ==================== MAIN COMPONENT ====================
 
 export default function DashboardPage() {
@@ -118,7 +151,13 @@ export default function DashboardPage() {
   const [midtermError, setMidtermError] = useState<string | null>(null);
   const [midtermMarket, setMidtermMarket] = useState<'ALL' | 'US' | 'HK'>('ALL');
 
-  // 模式切換（短炒 vs 中短線）
+  // 指數/槓桿ETF state
+  const [indexResults, setIndexResults] = useState<IndexResult[]>([]);
+  const [indexScanning, setIndexScanning] = useState(false);
+  const [indexError, setIndexError] = useState<string | null>(null);
+  const [indexGeneratedAt, setIndexGeneratedAt] = useState<string | null>(null);
+
+  // 模式切換（短炒 vs 中短線 vs 指數）
   const [mode, setMode] = useState<Mode>('shortterm');
 
   useEffect(() => { loadData(); }, []);
@@ -185,6 +224,23 @@ export default function DashboardPage() {
       setMidtermError(err instanceof Error ? err.message : '掃描失敗');
     } finally {
       setMidtermScanning(false);
+    }
+  };
+
+  // ==================== 指數/槓桿ETF掃描 ====================
+  const handleIndexScan = async () => {
+    setIndexScanning(true);
+    setIndexError(null);
+    try {
+      const response = await fetch('/api/index-scanner');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '掃描失敗');
+      setIndexResults(data.results || []);
+      setIndexGeneratedAt(data.generatedAt || null);
+    } catch (err) {
+      setIndexError(err instanceof Error ? err.message : '掃描失敗');
+    } finally {
+      setIndexScanning(false);
     }
   };
 
@@ -256,7 +312,7 @@ export default function DashboardPage() {
           <p className="text-slate-400 text-sm">AI 股票分析系統</p>
         </div>
 
-        {/* ===== 模式切換：短炒 / 中短線 ===== */}
+        {/* ===== 模式切換：短炒 / 中短線 / 指數 ===== */}
         <div className="flex gap-1 bg-white/5 border border-white/10 rounded-xl p-1 mb-6 w-fit">
           <button
             onClick={() => setMode('shortterm')}
@@ -271,6 +327,13 @@ export default function DashboardPage() {
           >
             <Target className="w-4 h-4" />
             中短線選股
+          </button>
+          <button
+            onClick={() => setMode('indices')}
+            className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${mode === 'indices' ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}
+          >
+            <Activity className="w-4 h-4" />
+            指數/槓桿ETF
           </button>
         </div>
 
@@ -552,6 +615,118 @@ export default function DashboardPage() {
                           建議持倉：{rec.holding_period}
                         </div>
                       </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ==================== 指數/槓桿ETF模式 ==================== */}
+        {mode === 'indices' && (
+          <>
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+              <Activity className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-amber-400 font-medium">指數 / 槓桿ETF 掃描</p>
+                <p className="text-slate-400 text-sm">
+                  分析道指(DIA)、納指(QQQ)、TQQQ、SQQQ、UVIX 過去5年ATR、均線同支持/阻力，
+                  道指同UVIX預設做空策略。建議價僅供參考，槓桿ETF長線持有有波動耗損風險。
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between mb-6">
+              <div className="text-slate-500 text-xs">
+                {indexGeneratedAt && `更新時間 ${new Date(indexGeneratedAt).toLocaleString('zh-HK')}`}
+              </div>
+              <button
+                onClick={handleIndexScan}
+                disabled={indexScanning}
+                className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg transition-all ${indexScanning ? 'bg-amber-400/20 text-amber-400 cursor-not-allowed' : 'bg-amber-400 text-[#0a0e1a] hover:bg-amber-300'}`}
+              >
+                <RefreshCw className={`w-4 h-4 ${indexScanning ? 'animate-spin' : ''}`} />
+                <span>{indexScanning ? '分析中...' : '刷新指數'}</span>
+              </button>
+            </div>
+
+            {indexError && (
+              <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                <div><p className="text-red-400 font-medium">掃描失敗</p><p className="text-slate-400 text-sm">{indexError}</p></div>
+              </div>
+            )}
+
+            {indexResults.length === 0 ? (
+              <div className="text-center py-16">
+                <Activity className="w-12 h-12 text-slate-600 mx-auto mb-4" />
+                <p className="text-slate-400">暫時沒有數據，請按「刷新指數」開始分析（首次約需30-40秒）</p>
+              </div>
+            ) : (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {indexResults.map((r) => {
+                  const isLong = r.direction === 'long';
+                  const trendInfo = TREND_LABELS[r.trend];
+                  const support = r.supportLevels?.[0]?.avg;
+                  const resistance = r.resistanceLevels?.[0]?.avg;
+                  const buyPrice = r.recommendation?.nextBuyPrice;
+                  const sellPrice = r.recommendation?.nextSellPrice;
+
+                  return (
+                    <div key={r.symbol} className={`bg-[#0d1224] border rounded-2xl overflow-hidden ${isLong ? 'border-emerald-400/30' : 'border-red-400/30'}`}>
+                      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className={`border text-xs font-bold px-2.5 py-1 rounded-full ${isLong ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-red-400 bg-red-500/10 border-red-500/20'}`}>
+                            {isLong ? '做多策略' : '做空策略'}
+                          </span>
+                          <div>
+                            <div className="text-white font-bold">{r.symbol}</div>
+                            <div className="text-slate-500 text-xs">{r.name}</div>
+                          </div>
+                        </div>
+                        <span className={`text-xs font-medium ${trendInfo.color}`}>{trendInfo.label}</span>
+                      </div>
+
+                      <div className="px-5 py-4 grid grid-cols-3 gap-3">
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">現價</div>
+                          <div className="text-white font-bold text-lg">${r.latestClose.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">{isLong ? '建議買入' : '建議做空'}</div>
+                          <div className="text-white font-bold text-lg">${buyPrice != null ? (isLong ? buyPrice : sellPrice)?.toFixed(2) : '—'}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">{isLong ? '建議賣出' : '建議回補'}</div>
+                          <div className={`font-bold text-lg ${isLong ? 'text-emerald-400' : 'text-red-400'}`}>
+                            ${sellPrice != null ? (isLong ? sellPrice : buyPrice)?.toFixed(2) : '—'}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+                        <div className="bg-white/5 rounded-xl px-3 py-2">
+                          <div className="text-slate-400 text-xs mb-0.5">支持位</div>
+                          <div className="text-slate-200 font-bold text-sm">{support != null ? support.toFixed(2) : '—'}</div>
+                        </div>
+                        <div className="bg-white/5 rounded-xl px-3 py-2">
+                          <div className="text-slate-400 text-xs mb-0.5">阻力位</div>
+                          <div className="text-slate-200 font-bold text-sm">{resistance != null ? resistance.toFixed(2) : '—'}</div>
+                        </div>
+                      </div>
+
+                      {r.indicators?.volumeSpikeRatio != null && (
+                        <div className="px-5 pb-3 text-xs text-slate-500">
+                          量比 {r.indicators.volumeSpikeRatio.toFixed(2)}x · ATR14 {r.indicators.atr14?.toFixed(2)}
+                        </div>
+                      )}
+
+                      {r.recommendation?.basis && (
+                        <div className="px-5 pb-4">
+                          <p className="text-slate-400 text-xs leading-relaxed">{r.recommendation.basis}</p>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
