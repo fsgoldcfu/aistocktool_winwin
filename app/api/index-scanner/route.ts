@@ -1,19 +1,33 @@
 // app/api/index-scanner/route.ts
 //
-// 撳「更新」時前端call呢個endpoint，
-// 一次過分析 道指(DIA)/納指(QQQ)/TQQQ/SQQQ/UVIX，
-// 回傳每隻嘅趨勢、支持阻力、下一個買入/賣出建議價。
+// 撳「更新」時前端call呢個endpoint。
+// 只有TQQQ一隻symbol，所以直接一次過攞返5年真實歷史數據
+// （唔使靜態寫死數據 —— 得一個symbol，一次API call已經好快，
+//   數據仲會永遠係最新，唔會有斷更/過時嘅問題）。
 //
 // ⚠️ 如果你個repo用緊 Pages Router(pages/api)，將呢個檔案
 // 改名放去 pages/api/index-scanner.ts，並改寫做:
 //   export default async function handler(req: NextApiRequest, res: NextApiResponse) { ... }
 
-import { WATCHLIST, fetchAllHistories, analyzeSymbol } from '@/lib/indexAnalysis';
+import { WATCHLIST, fetchDailyHistory, analyzeSymbol } from '@/lib/indexAnalysis';
 
-export const maxDuration = 60; // Vercel function timeout (5個symbol x 8秒throttle約需40秒)
+export const maxDuration = 30;
 
-export async function GET() {
+export async function GET(request: Request) {
   const apiKey = process.env.TWELVE_DATA_API_KEY;
+  const url = new URL(request.url);
+
+  // 診斷用：加 ?debug=1 打開個URL，唔會洩露key本身，
+  // 淨係話你知呢個deployment有冇讀到環境變數，方便核對緊邊個環境。
+  if (url.searchParams.get('debug') === '1') {
+    return Response.json({
+      hasApiKey: Boolean(apiKey),
+      apiKeyLength: apiKey ? apiKey.length : 0,
+      vercelEnv: process.env.VERCEL_ENV || 'unknown',
+      gitBranch: process.env.VERCEL_GIT_COMMIT_REF || 'unknown',
+      deployedAt: new Date().toISOString(),
+    });
+  }
 
   if (!apiKey) {
     return Response.json(
@@ -23,22 +37,22 @@ export async function GET() {
   }
 
   try {
-    const histories = await fetchAllHistories(WATCHLIST, apiKey);
+    const item = WATCHLIST[0]; // TQQQ
 
-    const results = WATCHLIST.map((item) => {
-      const bars = histories[item.symbol];
-      const analysis = analyzeSymbol(bars, { direction: item.direction });
-      return {
-        symbol: item.symbol,
-        name: item.name,
-        direction: item.direction,
-        ...analysis,
-      };
-    });
+    // 一次過攞5年daily歷史（單一symbol，一次call，唔使throttle）
+    const bars = await fetchDailyHistory(item.symbol, apiKey, 5);
+
+    const analysis = analyzeSymbol(bars, { direction: item.direction });
+    const result = {
+      symbol: item.symbol,
+      name: item.name,
+      direction: item.direction,
+      ...analysis,
+    };
 
     return Response.json({
       generatedAt: new Date().toISOString(),
-      results,
+      results: [result],
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : '未知錯誤';
