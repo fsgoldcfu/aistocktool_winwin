@@ -31,6 +31,11 @@ export interface Recommendation {
   basis: string;
 }
 
+export interface RecentExtreme {
+  price: number;
+  date: string;
+}
+
 export interface AnalysisResult {
   latestDate: string;
   latestClose: number;
@@ -46,6 +51,11 @@ export interface AnalysisResult {
   trend: 'strong' | 'neutral' | 'weak';
   supportLevels: LevelCluster[];
   resistanceLevels: LevelCluster[];
+  // 近10個交易日嘅極值，未經5日反向確認，僅供參考、唔會直接用嚟計算買賣建議價
+  recentReference: {
+    low: RecentExtreme;
+    high: RecentExtreme;
+  };
   recommendation: Recommendation;
 }
 
@@ -53,11 +63,7 @@ export interface AnalysisResult {
 
 // direction: 'long' = 你想搵買入訊號；'short' = 你想搵做空(賣出)訊號
 export const WATCHLIST: WatchlistItem[] = [
-  { symbol: 'DIA', name: '道瓊工業指數 (ETF代理)', direction: 'short' },
-  { symbol: 'QQQ', name: '納斯達克100指數 (ETF代理)', direction: 'long' },
   { symbol: 'TQQQ', name: 'TQQQ 3倍做多', direction: 'long' },
-  { symbol: 'SQQQ', name: 'SQQQ 3倍做空', direction: 'long' },
-  { symbol: 'UVIX', name: 'UVIX 2倍VIX', direction: 'short' },
 ];
 
 // ---------- 2. 攞歷史數據 (Twelve Data) ----------
@@ -80,6 +86,35 @@ export async function fetchDailyHistory(
     .toISOString()
     .slice(0, 10)}&end_date=${end.toISOString().slice(0, 10)}&outputsize=5000&apikey=${apiKey}`;
 
+  const res = await fetch(url);
+  const json = await res.json();
+
+  if (json.status === 'error' || !json.values) {
+    throw new Error(`Twelve Data 錯誤 (${symbol}): ${json.message || 'unknown'}`);
+  }
+
+  return json.values
+    .map((v: any) => ({
+      date: v.datetime,
+      open: parseFloat(v.open),
+      high: parseFloat(v.high),
+      low: parseFloat(v.low),
+      close: parseFloat(v.close),
+      volume: parseFloat(v.volume || 0),
+    }))
+    .reverse();
+}
+
+/**
+ * 輕量版：淨係攞最近 `days` 個交易日，用嚟更新「近期參考位」同重新計算指標，
+ * 唔使成次update都重新攞成年歷史，快好多。
+ */
+export async function fetchRecentHistory(
+  symbol: string,
+  apiKey: string,
+  days = 60
+): Promise<DailyBar[]> {
+  const url = `${TD_BASE}?symbol=${symbol}&interval=1day&outputsize=${days}&apikey=${apiKey}`;
   const res = await fetch(url);
   const json = await res.json();
 
@@ -187,6 +222,26 @@ function findSwingPoints(bars: DailyBar[], window = 5) {
   return { lows, highs };
 }
 
+/**
+ * 近期未確認參考位：唔使等「後5日」確認，
+ * 直接攞最近 `lookback` 個交易日嘅最低/最高，即時反應。
+ * 用嚟補返confirmed swing point「慢半拍」嘅缺口，
+ * 但由於未經確認，唔會直接用嚟計算買賣建議價，只做參考顯示。
+ */
+function findRecentExtreme(bars: DailyBar[], lookback = 10) {
+  const recent = bars.slice(-lookback);
+  let low = recent[0];
+  let high = recent[0];
+  for (const b of recent) {
+    if (b.low < low.low) low = b;
+    if (b.high > high.high) high = b;
+  }
+  return {
+    low: { price: low.low, date: low.date },
+    high: { price: high.high, date: high.date },
+  };
+}
+
 function clusterLevels(points: SwingPoint[], tolerance: number): LevelCluster[] {
   const sorted = [...points].sort((a, b) => a.price - b.price);
   const clusters: LevelCluster[] = [];
@@ -268,6 +323,8 @@ export function analyzeSymbol(
   const nearestResistance =
     [...resistanceClusters].sort((a, b) => a.avg - b.avg)[0] || null;
 
+  const recentReference = findRecentExtreme(bars, 10);
+
   const recommendation = buildRecommendation({
     direction: config.direction,
     latestClose,
@@ -275,6 +332,7 @@ export function analyzeSymbol(
     trend,
     nearestSupport,
     nearestResistance,
+    recentReference,
   });
 
   return {
@@ -292,6 +350,7 @@ export function analyzeSymbol(
     trend,
     supportLevels: supportClusters.slice(0, 3),
     resistanceLevels: resistanceClusters.slice(0, 3),
+    recentReference,
     recommendation,
   };
 }
@@ -303,6 +362,7 @@ function buildRecommendation({
   trend,
   nearestSupport,
   nearestResistance,
+  recentReference,
 }: {
   direction: 'long' | 'short';
   latestClose: number;
@@ -310,8 +370,14 @@ function buildRecommendation({
   trend: 'strong' | 'neutral' | 'weak';
   nearestSupport: LevelCluster | null;
   nearestResistance: LevelCluster | null;
+  recentReference: { low: RecentExtreme; high: RecentExtreme };
 }): Recommendation {
   const tpMult = TP_MULTIPLIER[trend];
+
+  // 如果最近10日出現嘅未確認低/高位，離現價喺1個ATR之內，加一句提示，
+  // 等你知道有個「啱啱發生緊」但未計入主要建議價嘅波動位存在。
+  const nearRecentLow = latestClose - recentReference.low.price <= latestAtr;
+  const nearRecentHigh = recentReference.high.price - latestClose <= latestAtr;
 
   if (direction === 'long') {
     const buyPrice = nearestSupport
@@ -321,11 +387,16 @@ function buildRecommendation({
     let sellPrice = latestClose + tpMult * latestAtr * 4;
     if (nearestResistance) sellPrice = Math.min(sellPrice, nearestResistance.avg);
 
+    let basis = `趨勢=${trend}，買入參考支持位${nearestSupport ? round2(nearestSupport.avg) : '（無明顯支持，用ATR估算）'}；賣出參考阻力位${nearestResistance ? round2(nearestResistance.avg) : '（無明顯阻力，用ATR估算）'}`;
+    if (nearRecentLow) {
+      basis += `｜提示：近10日曾跌至${round2(recentReference.low.price)}(${recentReference.low.date})，未經確認，僅供參考`;
+    }
+
     return {
       action: '低接做多',
       nextBuyPrice: round2(buyPrice),
       nextSellPrice: round2(sellPrice),
-      basis: `趨勢=${trend}，買入參考支持位${nearestSupport ? round2(nearestSupport.avg) : '（無明顯支持，用ATR估算）'}；賣出參考阻力位${nearestResistance ? round2(nearestResistance.avg) : '（無明顯阻力，用ATR估算）'}`,
+      basis,
     };
   } else {
     const sellPrice = nearestResistance
@@ -335,11 +406,16 @@ function buildRecommendation({
     let buyPrice = latestClose - tpMult * latestAtr * 4;
     if (nearestSupport) buyPrice = Math.max(buyPrice, nearestSupport.avg);
 
+    let basis = `趨勢=${trend}，做空進場參考阻力位${nearestResistance ? round2(nearestResistance.avg) : '（無明顯阻力，用ATR估算）'}；回補參考支持位${nearestSupport ? round2(nearestSupport.avg) : '（無明顯支持，用ATR估算）'}`;
+    if (nearRecentHigh) {
+      basis += `｜提示：近10日曾升至${round2(recentReference.high.price)}(${recentReference.high.date})，未經確認，僅供參考`;
+    }
+
     return {
       action: '高沽做空',
       nextSellPrice: round2(sellPrice),
       nextBuyPrice: round2(buyPrice),
-      basis: `趨勢=${trend}，做空進場參考阻力位${nearestResistance ? round2(nearestResistance.avg) : '（無明顯阻力，用ATR估算）'}；回補參考支持位${nearestSupport ? round2(nearestSupport.avg) : '（無明顯支持，用ATR估算）'}`,
+      basis,
     };
   }
 }
