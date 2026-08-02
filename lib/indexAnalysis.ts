@@ -374,22 +374,40 @@ function buildRecommendation({
 }): Recommendation {
   const tpMult = TP_MULTIPLIER[trend];
 
-  // 如果最近10日出現嘅未確認低/高位，離現價喺1個ATR之內，加一句提示，
-  // 等你知道有個「啱啱發生緊」但未計入主要建議價嘅波動位存在。
-  const nearRecentLow = latestClose - recentReference.low.price <= latestAtr;
-  const nearRecentHigh = recentReference.high.price - latestClose <= latestAtr;
+  // 近10日嘅未確認低/高位，只有喺離現價合理範圍內(2個ATR之內)先當有效，
+  // 避免用返太耐之前、已經冇意義嘅極值。
+  const recentLowValid =
+    recentReference.low.price < latestClose &&
+    latestClose - recentReference.low.price <= latestAtr * 2;
+  const recentHighValid =
+    recentReference.high.price > latestClose &&
+    recentReference.high.price - latestClose <= latestAtr * 2;
 
   if (direction === 'long') {
-    const buyPrice = nearestSupport
-      ? Math.max(nearestSupport.avg, latestClose - 0.5 * latestAtr)
-      : latestClose - 0.5 * latestAtr;
+    // 買入價：喺所有「現價之下」嘅有效支持候選入面，揀最貼近現價嗰個
+    // （即係最近、最實際嘅支持位），而唔係死跟3年確認支持位或者ATR估算。
+    const buyCandidates: number[] = [latestClose - 0.5 * latestAtr];
+    if (nearestSupport) buyCandidates.push(nearestSupport.avg);
+    if (recentLowValid) buyCandidates.push(recentReference.low.price);
+    const buyPrice = Math.max(...buyCandidates.filter((p) => p < latestClose));
 
-    let sellPrice = latestClose + tpMult * latestAtr * 4;
-    if (nearestResistance) sellPrice = Math.min(sellPrice, nearestResistance.avg);
+    // 賣出/止賺價：喺現價之上嘅阻力候選入面，揀最貼近現價嗰個做保守封頂，
+    // 近期未確認高位如果比3年阻力更貼近現價，都會攞嚟做封頂參考。
+    const sellCandidates: number[] = [latestClose + tpMult * latestAtr * 4];
+    if (nearestResistance) sellCandidates.push(nearestResistance.avg);
+    if (recentHighValid) sellCandidates.push(recentReference.high.price);
+    const sellPrice = Math.min(...sellCandidates.filter((p) => p > latestClose));
 
-    let basis = `趨勢=${trend}，買入參考支持位${nearestSupport ? round2(nearestSupport.avg) : '（無明顯支持，用ATR估算）'}；賣出參考阻力位${nearestResistance ? round2(nearestResistance.avg) : '（無明顯阻力，用ATR估算）'}`;
-    if (nearRecentLow) {
-      basis += `｜提示：近10日曾跌至${round2(recentReference.low.price)}(${recentReference.low.date})，未經確認，僅供參考`;
+    const usedRecentLow = recentLowValid && buyPrice === round2(recentReference.low.price);
+    const usedRecentHigh = recentHighValid && sellPrice === round2(recentReference.high.price);
+
+    let basis = `趨勢=${trend}，買入價=${
+      usedRecentLow ? '近期實際低位' : nearestSupport ? '3年確認支持位' : 'ATR估算'
+    }${round2(buyPrice)}；賣出價=${
+      usedRecentHigh ? '近期實際高位' : nearestResistance ? '3年確認阻力位' : 'ATR估算'
+    }${round2(sellPrice)}`;
+    if (recentLowValid) {
+      basis += `｜近10日曾跌至${round2(recentReference.low.price)}(${recentReference.low.date})`;
     }
 
     return {
@@ -399,16 +417,28 @@ function buildRecommendation({
       basis,
     };
   } else {
-    const sellPrice = nearestResistance
-      ? Math.min(nearestResistance.avg, latestClose + 0.5 * latestAtr)
-      : latestClose + 0.5 * latestAtr;
+    // 做空進場價：現價之上、最貼近現價嘅阻力候選（近期實際高位優先於估算值）
+    const sellCandidates: number[] = [latestClose + 0.5 * latestAtr];
+    if (nearestResistance) sellCandidates.push(nearestResistance.avg);
+    if (recentHighValid) sellCandidates.push(recentReference.high.price);
+    const sellPrice = Math.min(...sellCandidates.filter((p) => p > latestClose));
 
-    let buyPrice = latestClose - tpMult * latestAtr * 4;
-    if (nearestSupport) buyPrice = Math.max(buyPrice, nearestSupport.avg);
+    // 回補/止賺價：現價之下、最貼近現價嘅支持候選
+    const buyCandidates: number[] = [latestClose - tpMult * latestAtr * 4];
+    if (nearestSupport) buyCandidates.push(nearestSupport.avg);
+    if (recentLowValid) buyCandidates.push(recentReference.low.price);
+    const buyPrice = Math.max(...buyCandidates.filter((p) => p < latestClose));
 
-    let basis = `趨勢=${trend}，做空進場參考阻力位${nearestResistance ? round2(nearestResistance.avg) : '（無明顯阻力，用ATR估算）'}；回補參考支持位${nearestSupport ? round2(nearestSupport.avg) : '（無明顯支持，用ATR估算）'}`;
-    if (nearRecentHigh) {
-      basis += `｜提示：近10日曾升至${round2(recentReference.high.price)}(${recentReference.high.date})，未經確認，僅供參考`;
+    const usedRecentHigh = recentHighValid && sellPrice === round2(recentReference.high.price);
+    const usedRecentLow = recentLowValid && buyPrice === round2(recentReference.low.price);
+
+    let basis = `趨勢=${trend}，做空進場價=${
+      usedRecentHigh ? '近期實際高位' : nearestResistance ? '3年確認阻力位' : 'ATR估算'
+    }${round2(sellPrice)}；回補價=${
+      usedRecentLow ? '近期實際低位' : nearestSupport ? '3年確認支持位' : 'ATR估算'
+    }${round2(buyPrice)}`;
+    if (recentHighValid) {
+      basis += `｜近10日曾升至${round2(recentReference.high.price)}(${recentReference.high.date})`;
     }
 
     return {
