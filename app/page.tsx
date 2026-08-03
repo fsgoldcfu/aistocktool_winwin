@@ -658,10 +658,10 @@ export default function DashboardPage() {
             <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
               <Activity className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
               <div>
-                <p className="text-amber-400 font-medium">指數 / 槓桿ETF 掃描</p>
+                <p className="text-amber-400 font-medium">TQQQ 技術分析掃描</p>
                 <p className="text-slate-400 text-sm">
-                  分析道指(DIA)、納指(QQQ)、TQQQ、SQQQ、UVIX 過去5年ATR、均線同支持/阻力，
-                  道指同UVIX預設做空策略。建議價僅供參考，槓桿ETF長線持有有波動耗損風險。
+                  分析TQQQ過去10年daily數據：SMA20/50/200、ATR、RSI、布林通道、支持/阻力位，
+                  並用歷史回測統計超賣/超買訊號嘅命中率。建議價僅供參考，槓桿ETF長線持有有波動耗損風險。
                 </p>
               </div>
             </div>
