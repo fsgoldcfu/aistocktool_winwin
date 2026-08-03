@@ -39,8 +39,9 @@ export async function GET(request: Request) {
   try {
     const item = WATCHLIST[0]; // TQQQ
 
-    // 一次過攞5年daily歷史（單一symbol，一次call，唔使throttle）
-    const bars = await fetchDailyHistory(item.symbol, apiKey, 5);
+    // 一次過攞10年daily歷史（單一symbol，一次call，唔使throttle；
+    // 10年樣本數大好多，RSI/布林通道嘅歷史回測統計會更可靠）
+    const bars = await fetchDailyHistory(item.symbol, apiKey, 10);
 
     const analysis = analyzeSymbol(bars, { direction: item.direction });
     const result = {
