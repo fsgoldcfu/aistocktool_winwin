@@ -47,6 +47,10 @@ export interface AnalysisResult {
     avgVolume20: number | null;
     latestVolume: number;
     volumeSpikeRatio: number | null;
+    rsi14: number | null;
+    bollingerUpper: number | null;
+    bollingerLower: number | null;
+    bollingerPosition: 'above_upper' | 'below_lower' | 'inside' | null; // 現價相對布林通道嘅位置
   };
   trend: 'strong' | 'neutral' | 'weak';
   supportLevels: LevelCluster[];
@@ -55,6 +59,14 @@ export interface AnalysisResult {
   recentReference: {
     low: RecentExtreme;
     high: RecentExtreme;
+  };
+  // 用返成段歷史做嘅回測統計：呢個symbol過往RSI超賣/超買、布林觸底/觸頂之後，
+  // 通常會點郁（樣本數、勝率、平均幅度、平均需要幾多日）
+  historicalStats: {
+    oversoldBounce: SignalBacktestStats; // RSI<30 之後嘅反彈統計
+    overboughtPullback: SignalBacktestStats; // RSI>70 之後嘅回落統計
+    bollingerLowerBounce: SignalBacktestStats; // 觸及布林下軌之後嘅反彈統計
+    bollingerUpperPullback: SignalBacktestStats; // 觸及布林上軌之後嘅回落統計
   };
   recommendation: Recommendation;
 }
@@ -281,6 +293,153 @@ const TP_MULTIPLIER: Record<'strong' | 'neutral' | 'weak', number> = {
   weak: 0.15,
 };
 
+// ---------- 5b. RSI / 布林通道 ----------
+
+/** Wilder's RSI */
+function rsi(closes: number[], period = 14): (number | null)[] {
+  const out: (number | null)[] = new Array(closes.length).fill(null);
+  const gains: number[] = [0];
+  const losses: number[] = [0];
+  for (let i = 1; i < closes.length; i++) {
+    const change = closes[i] - closes[i - 1];
+    gains.push(Math.max(change, 0));
+    losses.push(Math.max(-change, 0));
+  }
+  let avgGain = 0;
+  let avgLoss = 0;
+  for (let i = 0; i < closes.length; i++) {
+    if (i < period) continue;
+    if (i === period) {
+      avgGain = gains.slice(1, period + 1).reduce((a, b) => a + b, 0) / period;
+      avgLoss = losses.slice(1, period + 1).reduce((a, b) => a + b, 0) / period;
+    } else {
+      avgGain = (avgGain * (period - 1) + gains[i]) / period;
+      avgLoss = (avgLoss * (period - 1) + losses[i]) / period;
+    }
+    const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + rs);
+  }
+  return out;
+}
+
+interface BollingerBands {
+  upper: (number | null)[];
+  middle: (number | null)[];
+  lower: (number | null)[];
+}
+
+function bollingerBands(closes: number[], period = 20, mult = 2): BollingerBands {
+  const middle = sma(closes, period);
+  const upper: (number | null)[] = new Array(closes.length).fill(null);
+  const lower: (number | null)[] = new Array(closes.length).fill(null);
+  for (let i = period - 1; i < closes.length; i++) {
+    const window = closes.slice(i - period + 1, i + 1);
+    const mean = middle[i] as number;
+    const variance = window.reduce((sum, c) => sum + (c - mean) ** 2, 0) / period;
+    const sd = Math.sqrt(variance);
+    upper[i] = mean + mult * sd;
+    lower[i] = mean - mult * sd;
+  }
+  return { upper, middle, lower };
+}
+
+// ---------- 5c. 歷史訊號回測統計 ----------
+
+export interface SignalBacktestStats {
+  label: string;
+  occurrences: number;
+  hitRate: number | null; // 百分比：出現訊號後，在窗口內達到目標幅度的次數比例
+  avgMovePct: number | null; // 平均最大波動幅度（%）
+  medianMovePct: number | null;
+  avgDaysToHit: number | null;
+}
+
+/**
+ * 通用回測：喺 `triggerIdxs` 呢啲交易日出現訊號之後，
+ * 睇未來 `window` 個交易日入面，價格喺 `direction` 方向最多郁咗幾多%，
+ * 有冇達到 `targetPct` 呢個門檻，同埋用咗幾多日先達到。
+ */
+function backtestSignal(
+  bars: DailyBar[],
+  triggerIdxs: number[],
+  window: number,
+  targetPct: number,
+  direction: 'up' | 'down',
+  label: string
+): SignalBacktestStats {
+  const moves: number[] = [];
+  const daysToHit: number[] = [];
+  let hits = 0;
+
+  for (const idx of triggerIdxs) {
+    const base = bars[idx].close;
+    if (base <= 0) continue;
+    const future = bars.slice(idx + 1, idx + 1 + window);
+    if (future.length === 0) continue;
+
+    let bestMovePct = 0;
+    let hitDay: number | null = null;
+    future.forEach((b, i) => {
+      const extreme = direction === 'up' ? b.high : b.low;
+      const movePct = direction === 'up' ? (extreme - base) / base : (base - extreme) / base;
+      if (movePct > bestMovePct) bestMovePct = movePct;
+      if (hitDay === null && movePct >= targetPct) hitDay = i + 1;
+    });
+
+    moves.push(bestMovePct * 100);
+    if (hitDay !== null) {
+      hits += 1;
+      daysToHit.push(hitDay);
+    }
+  }
+
+  if (moves.length === 0) {
+    return {
+      label,
+      occurrences: 0,
+      hitRate: null,
+      avgMovePct: null,
+      medianMovePct: null,
+      avgDaysToHit: null,
+    };
+  }
+
+  const sorted = [...moves].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const avg = moves.reduce((a, b) => a + b, 0) / moves.length;
+  const avgDays =
+    daysToHit.length > 0 ? daysToHit.reduce((a, b) => a + b, 0) / daysToHit.length : null;
+
+  return {
+    label,
+    occurrences: moves.length,
+    hitRate: Math.round((hits / moves.length) * 1000) / 10,
+    avgMovePct: Math.round(avg * 10) / 10,
+    medianMovePct: Math.round(median * 10) / 10,
+    avgDaysToHit: avgDays !== null ? Math.round(avgDays * 10) / 10 : null,
+  };
+}
+
+/**
+ * 搵所有「向下穿越門檻」(例如RSI由>=30跌到<30) 嘅交易日index，
+ * 用嚟做超賣/超買訊號嘅觸發點，避免連續多日都喺同一區間入面被重複計算。
+ */
+function findCrossings(
+  series: (number | null)[],
+  threshold: number,
+  direction: 'crossBelow' | 'crossAbove'
+): number[] {
+  const idxs: number[] = [];
+  for (let i = 1; i < series.length; i++) {
+    const prev = series[i - 1];
+    const cur = series[i];
+    if (prev === null || cur === null) continue;
+    if (direction === 'crossBelow' && prev >= threshold && cur < threshold) idxs.push(i);
+    if (direction === 'crossAbove' && prev <= threshold && cur > threshold) idxs.push(i);
+  }
+  return idxs;
+}
+
 // ---------- 6. 主分析函數 ----------
 
 export function analyzeSymbol(
@@ -297,10 +456,22 @@ export function analyzeSymbol(
   const sma200 = sma(closes, 200);
   const atr14 = atr(bars, 14);
   const vol = volumeStats(bars, 20);
+  const rsi14 = rsi(closes, 14);
+  const bb = bollingerBands(closes, 20, 2);
 
   const last = bars.length - 1;
   const latestClose = closes[last];
   const latestAtr = atr14[last] as number;
+  const latestRsi = rsi14[last];
+  const latestBbUpper = bb.upper[last];
+  const latestBbLower = bb.lower[last];
+
+  let bollingerPosition: 'above_upper' | 'below_lower' | 'inside' | null = null;
+  if (latestBbUpper !== null && latestBbLower !== null) {
+    if (latestClose > latestBbUpper) bollingerPosition = 'above_upper';
+    else if (latestClose < latestBbLower) bollingerPosition = 'below_lower';
+    else bollingerPosition = 'inside';
+  }
 
   const trend = classifyTrend({
     latestClose,
@@ -325,6 +496,23 @@ export function analyzeSymbol(
 
   const recentReference = findRecentExtreme(bars, 10);
 
+  // ---- 歷史回測：用成段可用歷史（唔止3年）計樣本 ----
+  const oversoldTriggers = findCrossings(rsi14, 30, 'crossBelow');
+  const overboughtTriggers = findCrossings(rsi14, 70, 'crossAbove');
+  const bbLowerTriggers = bars
+    .map((b, i) => (bb.lower[i] !== null && b.low <= (bb.lower[i] as number) ? i : -1))
+    .filter((i) => i >= 0);
+  const bbUpperTriggers = bars
+    .map((b, i) => (bb.upper[i] !== null && b.high >= (bb.upper[i] as number) ? i : -1))
+    .filter((i) => i >= 0);
+
+  const historicalStats = {
+    oversoldBounce: backtestSignal(bars, oversoldTriggers, 10, 0.05, 'up', 'RSI跌穿30後10日內反彈≥5%'),
+    overboughtPullback: backtestSignal(bars, overboughtTriggers, 10, 0.05, 'down', 'RSI升穿70後10日內回落≥5%'),
+    bollingerLowerBounce: backtestSignal(bars, bbLowerTriggers, 10, 0.05, 'up', '觸及布林下軌後10日內反彈≥5%'),
+    bollingerUpperPullback: backtestSignal(bars, bbUpperTriggers, 10, 0.05, 'down', '觸及布林上軌後10日內回落≥5%'),
+  };
+
   const recommendation = buildRecommendation({
     direction: config.direction,
     latestClose,
@@ -333,6 +521,9 @@ export function analyzeSymbol(
     nearestSupport,
     nearestResistance,
     recentReference,
+    latestRsi,
+    bollingerPosition,
+    historicalStats,
   });
 
   return {
@@ -346,11 +537,16 @@ export function analyzeSymbol(
       avgVolume20: vol.latestAvgVolume,
       latestVolume: vol.latestVolume,
       volumeSpikeRatio: vol.volumeSpikeRatio,
+      rsi14: latestRsi,
+      bollingerUpper: latestBbUpper,
+      bollingerLower: latestBbLower,
+      bollingerPosition,
     },
     trend,
     supportLevels: supportClusters.slice(0, 3),
     resistanceLevels: resistanceClusters.slice(0, 3),
     recentReference,
+    historicalStats,
     recommendation,
   };
 }
@@ -363,6 +559,9 @@ function buildRecommendation({
   nearestSupport,
   nearestResistance,
   recentReference,
+  latestRsi,
+  bollingerPosition,
+  historicalStats,
 }: {
   direction: 'long' | 'short';
   latestClose: number;
@@ -371,8 +570,40 @@ function buildRecommendation({
   nearestSupport: LevelCluster | null;
   nearestResistance: LevelCluster | null;
   recentReference: { low: RecentExtreme; high: RecentExtreme };
+  latestRsi: number | null;
+  bollingerPosition: 'above_upper' | 'below_lower' | 'inside' | null;
+  historicalStats: {
+    oversoldBounce: SignalBacktestStats;
+    overboughtPullback: SignalBacktestStats;
+    bollingerLowerBounce: SignalBacktestStats;
+    bollingerUpperPullback: SignalBacktestStats;
+  };
 }): Recommendation {
   const tpMult = TP_MULTIPLIER[trend];
+
+  // 睇下現時RSI/布林通道狀態，係咪啱啱好觸發咗超賣/超買訊號，
+  // 如果係，就將對應嘅歷史回測統計（樣本數/勝率/平均幅度/平均日數）組成一句話。
+  const isOversold = (latestRsi !== null && latestRsi < 30) || bollingerPosition === 'below_lower';
+  const isOverbought = (latestRsi !== null && latestRsi > 70) || bollingerPosition === 'above_upper';
+
+  function formatStat(stat: SignalBacktestStats): string | null {
+    if (stat.occurrences === 0 || stat.hitRate === null) return null;
+    return `${stat.label}：過往${stat.occurrences}次入面${stat.hitRate}%命中，平均幅度${stat.avgMovePct}%，平均${stat.avgDaysToHit}日內達到`;
+  }
+
+  const oversoldNote = isOversold
+    ? [formatStat(historicalStats.oversoldBounce), formatStat(historicalStats.bollingerLowerBounce)]
+        .filter(Boolean)
+        .join('；')
+    : null;
+  const overboughtNote = isOverbought
+    ? [
+        formatStat(historicalStats.overboughtPullback),
+        formatStat(historicalStats.bollingerUpperPullback),
+      ]
+        .filter(Boolean)
+        .join('；')
+    : null;
 
   // 近10日嘅未確認低/高位，只有喺離現價合理範圍內(2個ATR之內)先當有效，
   // 避免用返太耐之前、已經冇意義嘅極值。
@@ -409,6 +640,12 @@ function buildRecommendation({
     if (recentLowValid) {
       basis += `｜近10日曾跌至${round2(recentReference.low.price)}(${recentReference.low.date})`;
     }
+    if (oversoldNote) {
+      basis += `｜現處超賣區：${oversoldNote}`;
+    }
+    if (overboughtNote) {
+      basis += `｜現處超買區（留意漲勢可能轉弱）：${overboughtNote}`;
+    }
 
     return {
       action: '低接做多',
@@ -439,6 +676,12 @@ function buildRecommendation({
     }${round2(buyPrice)}`;
     if (recentHighValid) {
       basis += `｜近10日曾升至${round2(recentReference.high.price)}(${recentReference.high.date})`;
+    }
+    if (overboughtNote) {
+      basis += `｜現處超買區：${overboughtNote}`;
+    }
+    if (oversoldNote) {
+      basis += `｜現處超賣區（留意跌勢可能轉弱）：${oversoldNote}`;
     }
 
     return {
