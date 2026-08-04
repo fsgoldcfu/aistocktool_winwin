@@ -110,6 +110,7 @@ interface IndexResult {
   symbol: string;
   name: string;
   direction: 'long' | 'short';
+  priceIsLive?: boolean;
   latestClose: number;
   latestDate: string;
   trend: 'strong' | 'neutral' | 'weak';
@@ -719,7 +720,12 @@ export default function DashboardPage() {
 
                       <div className="px-5 py-4 grid grid-cols-3 gap-3">
                         <div>
-                          <div className="text-slate-400 text-xs mb-1">現價</div>
+                          <div className="text-slate-400 text-xs mb-1 flex items-center gap-1.5">
+                            現價
+                            <span className={r.priceIsLive ? 'text-emerald-400' : 'text-amber-400'}>
+                              {r.priceIsLive ? '● 即市' : '● 收市價'}
+                            </span>
+                          </div>
                           <div className="text-white font-bold text-lg">${r.latestClose.toFixed(2)}</div>
                         </div>
                         <div>
