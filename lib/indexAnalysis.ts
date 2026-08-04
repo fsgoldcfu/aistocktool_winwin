@@ -1,7 +1,8 @@
 // lib/indexAnalysis.ts
 //
-// 指數/槓桿ETF 歷史數據分析引擎
-// 涵蓋：道指(DIA代理)、納指(QQQ代理)、TQQQ、SQQQ、UVIX
+// TQQQ 歷史數據分析引擎（技術指標 + 支持/阻力 + 歷史訊號回測）
+// 涵蓋：SMA20/50/200、ATR、RSI、布林通道、swing支持/阻力位、
+// 近期未確認參考位、以及RSI/布林超賣超買訊號嘅歷史勝率回測
 
 export interface DailyBar {
   date: string;
@@ -85,6 +86,22 @@ const TD_BASE = 'https://api.twelvedata.com/time_series';
 /**
  * 攞單一symbol嘅5年daily K線 (由舊至新排序)
  */
+/**
+ * 攞即市實時報價（唔係daily收盤價）。
+ * Twelve Data 嘅 /price endpoint 反映依家嘅市場價，
+ * 用嚟做「現價」顯示、同埋做買賣建議價嘅錨點，
+ * 技術指標(SMA/RSI/ATR)就繼續用daily歷史數據計。
+ */
+export async function fetchLivePrice(symbol: string, apiKey: string): Promise<number> {
+  const url = `https://api.twelvedata.com/price?symbol=${symbol}&apikey=${apiKey}`;
+  const res = await fetch(url);
+  const json = await res.json();
+  if (!json.price) {
+    throw new Error(`Twelve Data 即市報價錯誤 (${symbol}): ${json.message || 'unknown'}`);
+  }
+  return parseFloat(json.price);
+}
+
 export async function fetchDailyHistory(
   symbol: string,
   apiKey: string,
@@ -444,7 +461,7 @@ function findCrossings(
 
 export function analyzeSymbol(
   bars: DailyBar[],
-  config: { direction: 'long' | 'short' }
+  config: { direction: 'long' | 'short'; livePrice?: number }
 ): AnalysisResult {
   if (!bars || bars.length < 210) {
     throw new Error('數據不足，至少需要約210個交易日先可以計SMA200/ATR');
@@ -460,7 +477,10 @@ export function analyzeSymbol(
   const bb = bollingerBands(closes, 20, 2);
 
   const last = bars.length - 1;
-  const latestClose = closes[last];
+  // 「現價」優先用即市報價（如果有提供），否則退回最新daily收盤價。
+  // SMA/RSI/ATR呢啲lagging指標本身就係計daily歷史，唔受呢個影響；
+  // 但支持/阻力嘅遠近判斷、買賣建議價嘅錨點，應該用返貼近現實嘅即市價。
+  const latestClose = config.livePrice ?? closes[last];
   const latestAtr = atr14[last] as number;
   const latestRsi = rsi14[last];
   const latestBbUpper = bb.upper[last];
