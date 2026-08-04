@@ -9,7 +9,7 @@
 // 改名放去 pages/api/index-scanner.ts，並改寫做:
 //   export default async function handler(req: NextApiRequest, res: NextApiResponse) { ... }
 
-import { WATCHLIST, fetchDailyHistory, analyzeSymbol } from '@/lib/indexAnalysis';
+import { WATCHLIST, fetchDailyHistory, fetchLivePrice, analyzeSymbol } from '@/lib/indexAnalysis';
 
 export const maxDuration = 30;
 
@@ -41,13 +41,22 @@ export async function GET(request: Request) {
 
     // 一次過攞10年daily歷史（單一symbol，一次call，唔使throttle；
     // 10年樣本數大好多，RSI/布林通道嘅歷史回測統計會更可靠）
-    const bars = await fetchDailyHistory(item.symbol, apiKey, 10);
+    // + 同時攞返即市報價（daily bar嘅收盤價只反映上一個完整交易日，
+    //   唔會update實時價格，所以要獨立攞多一個price endpoint）
+    const [bars, livePrice] = await Promise.all([
+      fetchDailyHistory(item.symbol, apiKey, 10),
+      fetchLivePrice(item.symbol, apiKey).catch(() => null), // 即市報價攞唔到就fallback用daily收盤價
+    ]);
 
-    const analysis = analyzeSymbol(bars, { direction: item.direction });
+    const analysis = analyzeSymbol(bars, {
+      direction: item.direction,
+      livePrice: livePrice ?? undefined,
+    });
     const result = {
       symbol: item.symbol,
       name: item.name,
       direction: item.direction,
+      priceIsLive: livePrice !== null,
       ...analysis,
     };
 
