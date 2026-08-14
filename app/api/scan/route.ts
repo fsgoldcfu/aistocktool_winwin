@@ -1,14 +1,19 @@
 // app/api/scan/route.ts
-import { NextRequest, NextResponse } from 'next/server'
-import { runUSScannerV3_7 } from '../../../lib/usScannerV3_7'
+import { NextRequest, NextResponse } from 'next/server';
+import { runUSScannerV3_7 } from '../../../lib/usScannerV3_7';
+
+export const maxDuration = 300;
+export const dynamic = 'force-dynamic';
+
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { thresholdSoftenerActive = false } = body
-    const result = await runUSScannerV3_7(thresholdSoftenerActive)
-    // 轉換成 dashboard 期望嘅格式
+    const body = await req.json().catch(() => ({}));
+    const thresholdSoftenerActive = body?.thresholdSoftenerActive === true;
+    const result = await runUSScannerV3_7(thresholdSoftenerActive);
+    const generatedAt = new Date().toISOString();
+
     const signals = result.recommendations.map((rec) => ({
-      id: rec.symbol + '-' + Date.now(),
+      id: `${rec.symbol}-${generatedAt}`,
       stock_code: rec.symbol,
       stock_name: rec.stockName,
       signal_type: 'buy',
@@ -21,26 +26,38 @@ export async function POST(req: NextRequest) {
       timeframe: 'intraday',
       status: 'active',
       result_pct: null,
-      created_at: new Date().toISOString(),
+      created_at: generatedAt,
       is_premium: false,
-      // ===== 新增：港幣資金配置 + 逆市抗跌股標記 =====
       capitalAllocatedHKD: rec.capitalAllocatedHKD,
       expectedProfitHKD: rec.expectedProfitHKD,
       isCounterTrend: rec.isCounterTrend,
-    }))
-    return NextResponse.json({
-      success: true,
-      signals,
-      usedSoftener: result.thresholdSoftenerActive,
-      nearMissCount: 0,
-      totalScanned: result.totalScanned,
-      isDownMarket: result.isDownMarket,
-    })
-  } catch (error) {
-    console.error('[API/scan] Error:', error)
+      riskRewardRatio: rec.riskRewardRatio,
+      atrPercent: rec.atrPercent,
+      entryRule: rec.entryRule,
+      invalidation: rec.invalidation,
+      maxHoldingMinutes: rec.maxHoldingMinutes,
+      resistanceLevel: rec.resistanceLevel,
+      resistanceSource: rec.resistanceSource,
+    }));
+
     return NextResponse.json(
-      { success: false, error: '掃描服務暫時不可用，請稍後再試' },
-      { status: 500 }
-    )
+      {
+        success: true,
+        signals,
+        usedSoftener: result.thresholdSoftenerActive,
+        totalScanned: result.totalScanned,
+        isDownMarket: result.isDownMarket,
+        marketPhase: result.marketPhase,
+        marketClosedNotice: result.marketClosedNotice || null,
+        generatedAt,
+      },
+      { headers: { 'Cache-Control': 'no-store, max-age=0' } }
+    );
+  } catch (error) {
+    console.error('[API/scan] Error:', error);
+    return NextResponse.json(
+      { success: false, error: '美股掃描資料暫時不可用，系統未產生交易訊號。' },
+      { status: 503, headers: { 'Cache-Control': 'no-store, max-age=0' } }
+    );
   }
 }
