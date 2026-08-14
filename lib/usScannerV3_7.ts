@@ -17,6 +17,7 @@
 
 // ==================== 真實數據源（Finnhub API） ====================
 import { yfinanceData as financeAPI } from "./yfinanceData";
+import { buildLongIntradayRiskPlan } from "./shortTermRisk";
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedScanResult: { result: any; timestamp: number } | null = null;
@@ -99,7 +100,9 @@ const CONFIG = {
   hkdToUsdRate: 7.8,              // 港幣兌美金匯率，可定期手動更新
 
   positionsCount: 5,              // 每次推介5隻（不變）
-  maxStopLossPercent: 3,          // Max 3% stop loss
+  maxStopLossPercent: 0.03,      // 以小數表示：最多 3% 初始風險
+  minimumRewardRisk: 1.5,         // 最低 1.5R，否則不推介
+  maxHoldingMinutes: 90,          // intraday time stop，避免訊號變成無限期持倉
   minConfidence: 60,              // Minimum confidence score
   thresholdSoftenerEnabled: false, // 降維試槍開關
 
@@ -212,6 +215,9 @@ export interface V3_7Recommendation {
   capitalAllocatedHKD: number;  // 港幣顯示，方便對照實際資金
   expectedProfitHKD: number;    // 港幣顯示，方便對照實際利潤
   isCounterTrend: boolean;      // 是否為「逆市抗跌股」
+  entryRule: string;
+  invalidation: string;
+  maxHoldingMinutes: number;
 }
 
 export interface ScanResult {
@@ -227,6 +233,7 @@ export interface ScanResult {
   stage4Candidates: number;
   thresholdSoftenerActive: boolean; // 降維試槍開關狀態
   isDownMarket?: boolean;           // 是否為跌市模式
+  marketClosedNotice?: string;
 }
 
 // ============================================================
@@ -238,45 +245,33 @@ export interface ScanResult {
  * Module 3: 鎖死「香港實時時區判定」與美股時差校準
  */
 function getHKTimeInfo() {
-  const hktString = new Date().toLocaleString("en-US", { timeZone: "Asia/Hong_Kong", hour12: false });
-  const currentTime = new Date(hktString);
-  const hkHour = currentTime.getHours();
-  const hkMinute = currentTime.getMinutes();
-  const hkDayOfWeek = currentTime.getDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
-  const hkTimeStr = `${String(hkHour).padStart(2, '0')}:${String(hkMinute).padStart(2, '0')}`;
-
-  let marketPhase = "closed";
-  // US market open (9:30 AM EST) is 9:30 PM HKT
-  // US market close (4:00 PM EST) is 4:00 AM HKT (next day)
-  // Opening hour: 21:30 - 22:30 HKT
-  // Active session: 22:30 - 04:00 HKT
-
-  // ==================== 真實交易日檢查 ====================
-  const isWeekendClosed =
-    hkDayOfWeek === 0 || // 星期日全日休市
-    (hkDayOfWeek === 1 && hkHour < 9) || // 星期一凌晨（對應美東星期日）
-    (hkDayOfWeek === 6 && hkHour >= 4); // 星期六04:00後（對應美東星期五收市後）
-
-  const isTradingDay = !isWeekendClosed;
-
-  // Dynamic Market Phase Determination for US market based on HKT
-  if (isTradingDay) {
-    if ((hkHour === 21 && hkMinute >= 30) || (hkHour === 22 && hkMinute < 30)) {
-      marketPhase = "opening-hour";
-    } else if ((hkHour === 22 && hkMinute >= 30) || (hkHour >= 23) || (hkHour >= 0 && hkHour < 4)) {
-      marketPhase = "active-session";
-    } else if (hkHour >= 9 && hkHour < 15) { // HKT 09:00 - 15:00, US market is closed but allow analysis
-      marketPhase = "closed-analysis";
-    }
-  } else {
-    marketPhase = "market-closed-weekend";
-  }
+  const now = new Date();
+  const getParts = (timeZone: string) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(now);
+    const value = (type: string) => parts.find((part) => part.type === type)?.value || '0';
+    const weekday = value('weekday');
+    return { hour: Number(value('hour')), minute: Number(value('minute')), weekday };
+  };
+  const hk = getParts('Asia/Hong_Kong');
+  const ny = getParts('America/New_York');
+  const hkTimeStr = `${String(hk.hour).padStart(2, '0')}:${String(hk.minute).padStart(2, '0')}`;
+  const nyMinutes = ny.hour * 60 + ny.minute;
+  const isTradingDay = !['Sat', 'Sun'].includes(ny.weekday);
+  const marketPhase = !isTradingDay
+    ? 'market-closed-weekend'
+    : nyMinutes >= 570 && nyMinutes < 630
+      ? 'opening-hour'
+      : nyMinutes >= 630 && nyMinutes < 960
+        ? 'active-session'
+        : 'closed-analysis';
 
   if (DEBUG_MODE) {
-    console.log(`[DEBUG] HKT Time: ${hkTimeStr} (Day ${hkDayOfWeek}), Market Phase: ${marketPhase}, IsTradingDay: ${isTradingDay}`);
+    console.log(`[DEBUG] HKT ${hkTimeStr}; NY ${ny.hour}:${String(ny.minute).padStart(2, '0')}; phase ${marketPhase}; weekday ${ny.weekday}`);
   }
-
-  return { hkHour, hkMinute, hkTimeStr, marketPhase, isTradingDay };
+  // 公眾假期仍須由資料供應商是否返回有效 quote / bar 作最後 gate。
+  return { hkHour: hk.hour, hkMinute: hk.minute, hkTimeStr, nyHour: ny.hour, nyMinute: ny.minute, marketPhase, isTradingDay };
 }
 
 /**
@@ -748,16 +743,16 @@ function buildRecommendation(
   const { quote, indicators, candles, news, volumeRatio, volumeSpike } = data;
   
   const currentPrice = quote.price;
-  const prevClose = candles[candles.length - 2]?.close || currentPrice; 
-  const changePercent = ((currentPrice - prevClose) / prevClose);
+  // 報價供應商以 previous close 計算的變幅，避免日線資料有／無當日未完成 bar 時訊號改變。
+  const changePercent = quote.changePercent;
   const stockName = US_STOCK_NAMES[symbol] || symbol;
 
   let debugReason = ``;
 
-  // Module 3: 調整 Stage 4 晚盤判定: 以香港時間為準，超過 23:30 HKT 後進入美股深夜盤，強制實施 `changePercent > 0` 限制
-  if (hkTimeInfo.hkHour >= 23 && hkTimeInfo.hkMinute >= 30 || hkTimeInfo.hkHour < 4) { // After 23:30 HKT
+  // 美東 14:30 後只接受仍然上升的股票；以 America/New_York 計算，避免夏令時間令 HKT 固定時段錯位。
+  if (hkTimeInfo.nyHour > 14 || (hkTimeInfo.nyHour === 14 && hkTimeInfo.nyMinute >= 30)) {
     if (changePercent <= 0) {
-      debugReason = `Late Session (after 23:30 HKT): Stock is not rising (changePercent: ${(changePercent * 100).toFixed(2)}%)`;
+      debugReason = `Late Session: stock is not rising (changePercent: ${(changePercent * 100).toFixed(2)}%)`;
       return { recommendation: null, debugReason };
     }
   }
@@ -778,15 +773,22 @@ function buildRecommendation(
   const ema10 = closes.length >= 10 ? calculateEMA(closes, 10) : 0;
   const atrPercent = currentPrice > 0 ? (indicators.atr / currentPrice) * 100 : 0;
 
-  const { resistanceLevel, source: resistanceSource } = calculateResistance(candles, currentPrice, indicators.atr);
-  
-  // 戰術變更: 止盈位（TP）計算大瘦身（改為 0.5x ATR）
-  let takeProfitPrice = currentPrice + indicators.atr * 0.5;
-  
-  const stopLossDistance = Math.max(indicators.atr * 0.7, currentPrice * 0.02); 
-  const stopLossPrice = currentPrice - stopLossDistance;
-  
-  const feasibilityInfo = validateProfitFeasibility(currentPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive);
+  const riskPlanResult = buildLongIntradayRiskPlan({
+    currentPrice,
+    atr: indicators.atr,
+    candles,
+    tickSize: getTickSize(currentPrice),
+    maxStopLossPercent: CONFIG.maxStopLossPercent,
+    minimumRewardRisk: CONFIG.minimumRewardRisk,
+    maxHoldingMinutes: CONFIG.maxHoldingMinutes,
+  });
+  if (!riskPlanResult.plan) {
+    debugReason = `Risk Plan Rejected: ${riskPlanResult.reason}`;
+    return { recommendation: null, debugReason };
+  }
+  const { entryPrice: plannedEntryPrice, takeProfitPrice, stopLossPrice, resistanceLevel, resistanceSource, riskRewardRatio, entryRule, invalidation, maxHoldingMinutes } = riskPlanResult.plan;
+
+  const feasibilityInfo = validateProfitFeasibility(plannedEntryPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive);
   
   if (!feasibilityInfo.feasible) {
     debugReason = `Profit Feasibility Check Failed: ${feasibilityInfo.reason}`;
@@ -838,7 +840,8 @@ function buildRecommendation(
 
   // 板塊共振拉滿信心
   if (isResonance) {
-    confidence = 100; // 信心指數直接拉滿至100%
+    // 板塊共振只是一項 feature，不可把未經校準的分數直接標示為 100% 勝率。
+    confidence += 5;
   }
   
   // 降維試槍開關: 當開關啟用時，RSI 限制放寬至 >45
@@ -865,16 +868,16 @@ function buildRecommendation(
   }
 
   confidence = Math.max(0, Math.min(100, confidence));
-
-  const potentialProfit = takeProfitPrice - currentPrice;
-  const potentialLoss = currentPrice - stopLossPrice;
-  const riskRewardRatio = potentialLoss > 0 ? potentialProfit / potentialLoss : 0;
+  if (confidence < CONFIG.minConfidence) {
+    debugReason = `Confidence ${confidence} below minimum ${CONFIG.minConfidence}; not enough independent confirmations.`;
+    return { recommendation: null, debugReason };
+  }
   
   return {
     recommendation: {
       symbol,
       stockName,
-      currentPrice,
+      currentPrice: plannedEntryPrice,
       change: quote.change,
       changePercent: quote.changePercent,
       
@@ -909,6 +912,9 @@ function buildRecommendation(
       confidence,
       riskRewardRatio,
       debugReason,
+      entryRule,
+      invalidation,
+      maxHoldingMinutes,
 
       capitalAllocatedHKD,
       expectedProfitHKD,
@@ -957,6 +963,25 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     cachedScanResult = { result: closedResult, timestamp: Date.now() };
     return closedResult;
   }
+  // 短炒計劃只在正式 regular session 產生；收市分析不可偽裝為可即時下單訊號。
+  if (!['opening-hour', 'active-session'].includes(hkTimeInfo.marketPhase)) {
+    return {
+      recommendations: [],
+      scanTime: new Date().toISOString(),
+      hkTime: hkTimeInfo.hkTimeStr,
+      marketPhase: hkTimeInfo.marketPhase,
+      indexChangePercent: 0,
+      totalScanned: 0,
+      stage1Candidates: 0,
+      stage2Candidates: 0,
+      stage3Candidates: 0,
+      stage4Candidates: 0,
+      thresholdSoftenerActive,
+      isDownMarket: false,
+      marketClosedNotice: '美股正規交易時段以外不產生可交易短炒訊號；請待美東 09:30–16:00 再掃描。',
+    };
+  }
+
   console.log(`[US V3.7] 單注資金: $${capitalPerPositionUSD.toFixed(0)} USD（≈HK$${(capitalPerPositionUSD * CONFIG.hkdToUsdRate).toFixed(0)}），最低目標利潤: $${minTargetProfitPerStockUSD.toFixed(0)} USD/股（≈HK$${(minTargetProfitPerStockUSD * CONFIG.hkdToUsdRate).toFixed(0)}）`);
   if (thresholdSoftenerActive) {
     console.log(`[US V3.7] ⚠️ 降維試槍開關已啟用：利潤門檻打8折，RSI放寬至>45。`);
@@ -1006,11 +1031,9 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
         if (!data) continue;
         
         const { quote, volumeSpike } = data;
-        const currentPrice = quote.price;
-        const prevClose = data.candles[data.candles.length - 2]?.close || currentPrice;
-        const changePercent = ((currentPrice - prevClose) / prevClose) * 100;
+        const changePercent = quote.changePercent;
         
-        if (changePercent > 3 && volumeSpike) {
+        if (changePercent > 0.03 && volumeSpike) {
           sectorSpikesCount++;
         }
       }
@@ -1105,7 +1128,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
         if (a.isCounterTrend && !b.isCounterTrend) return -1;
         if (!a.isCounterTrend && b.isCounterTrend) return 1;
       }
-      return b.expectedProfit - a.expectedProfit || b.confidence - a.confidence;
+      return b.riskRewardRatio - a.riskRewardRatio || b.confidence - a.confidence || b.expectedProfit - a.expectedProfit;
     })
     .slice(0, CONFIG.positionsCount); // Target 5 stocks
   
@@ -1115,7 +1138,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
   for (const rec of finalRecommendations) {
     console.log(`[US V3.7] → ${rec.symbol} (${rec.stockName}): 階段 ${rec.stage}, 信心 ${rec.confidence}%, TP=$${rec.takeProfitPrice.toFixed(2)}, 預期利潤=$${rec.expectedProfit.toFixed(0)} USD (HK$${rec.expectedProfitHKD.toFixed(0)}), 逆市股=${rec.isCounterTrend}, 可行=${rec.profitFeasible}, 原因: ${rec.triggerReason}`);
   }
-  console.log("\n⚠️ 玄金操盤手提醒：當前戰術為【極速流】，不論是否到達 TP，香港時間 22:55 必須市價全清，絕不留戀！");
+  console.log(`\n⚠️ 短炒風險規則：每個計劃最長持有 ${CONFIG.maxHoldingMinutes} 分鐘；跌穿 initial stop 或時間到即退出。`);
 
   if (DEBUG_MODE) {
     console.log("\n[DEBUG] Rejected Stocks Reasons:");
@@ -1145,4 +1168,4 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
 }
 
 // Debugging flag
-const DEBUG_MODE = true;
+const DEBUG_MODE = process.env.SCANNER_DEBUG === 'true';
