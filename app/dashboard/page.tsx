@@ -103,23 +103,50 @@ interface IndexResult {
   direction: 'long' | 'short';
   latestClose: number;
   latestDate: string;
+  signalClose: number;
+  analysisAsOf: string;
   trend: 'strong' | 'neutral' | 'weak';
   supportLevels: { avg: number; touches: number }[];
   resistanceLevels: { avg: number; touches: number }[];
+  data: {
+    priceSource: 'twelve_data_price' | 'prior_close';
+    priceTimestamp: string;
+    lastCompletedDailyBar: string;
+    signalUsesCompletedDailyBar: true;
+  };
   indicators: {
-    sma20: number;
-    sma50: number;
-    sma200: number;
-    atr14: number;
-    avgVolume20: number;
+    sma20: number | null;
+    sma50: number | null;
+    sma200: number | null;
+    atr14: number | null;
+    avgVolume20: number | null;
     latestVolume: number;
     volumeSpikeRatio: number | null;
+    rsi14: number | null;
+  };
+  strategyBacktest: {
+    inSample: { trades: number; winRate: number | null; avgR: number | null; maxDrawdownPct: number | null };
+    outOfSample: { trades: number; winRate: number | null; avgR: number | null; maxDrawdownPct: number | null };
+    validationNote: string;
   };
   recommendation: {
+    status: 'TRADEABLE' | 'WATCH' | 'NO_TRADE';
     action: string;
-    nextBuyPrice: number;
-    nextSellPrice: number;
+    nextBuyPrice: number | null;
+    nextSellPrice: number | null;
     basis: string;
+    reasons: string[];
+    tradePlan: {
+      entry: number;
+      initialStop: number;
+      target1: number;
+      target2: number;
+      riskPerShare: number;
+      rewardRiskToT1: number;
+      maxHoldingDays: number;
+      entryRule: string;
+      invalidation: string;
+    } | null;
   };
 }
 
@@ -414,7 +441,7 @@ export default function DashboardPage() {
             {displaySignals.length === 0 ? (
               <div className="text-center py-16">
                 <Clock className="w-12 h-12 text-slate-600 mx-auto mb-4" />
-                <p className="text-slate-400">暫時沒有訊號，請按「刷新{market === 'HK' ? '港股' : '美股'}」開始掃描</p>
+                <p className="text-slate-400">{marketClosedNotice || `暫時沒有合格訊號；系統不會為湊數而顯示交易建議。`}</p>
               </div>
             ) : (
               <div className="grid gap-4 lg:grid-cols-2">
@@ -457,22 +484,30 @@ export default function DashboardPage() {
                           </div>
                           {hasCapitalInfo && (
                             <div className="px-5 pb-3 grid grid-cols-2 gap-3">
-                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">建議投入</div><div className="text-white font-bold text-sm">HK${signal.capitalAllocatedHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
-                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">預期利潤</div><div className="text-emerald-400 font-bold text-sm">HK${signal.expectedProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">配置參考</div><div className="text-white font-bold text-sm">HK${signal.capitalAllocatedHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">目標毛利參考</div><div className="text-emerald-400 font-bold text-sm">HK${signal.expectedProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+                            </div>
+                          )}
+                          {typeof signal.riskRewardRatio === 'number' && (
+                            <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">回報／風險</div><div className="text-amber-400 font-bold text-sm">{signal.riskRewardRatio.toFixed(2)}R</div></div>
+                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">時間退出</div><div className="text-slate-200 font-bold text-sm">{signal.maxHoldingMinutes || '—'} 分鐘</div></div>
                             </div>
                           )}
                           <div className="px-5 pb-4">
                             <div className="flex items-center justify-between mb-1.5">
-                              <span className="text-slate-400 text-xs">AI 信心指數</span>
+                              <span className="text-slate-400 text-xs">策略分數（非勝率）</span>
                               <span className="text-amber-400 text-xs font-bold">{signal.confidence}%</span>
                             </div>
                             <div className="h-1.5 bg-white/10 rounded-full">
                               <div className="h-1.5 bg-gradient-to-r from-amber-400 to-amber-300 rounded-full" style={{ width: `${signal.confidence}%` }} />
                             </div>
                           </div>
-                          {signal.analysis && <div className="px-5 pb-4"><p className="text-slate-400 text-xs leading-relaxed line-clamp-3">{signal.analysis}</p></div>}
+                          {signal.analysis && <div className="px-5 pb-2"><p className="text-slate-400 text-xs leading-relaxed line-clamp-3">{signal.analysis}</p></div>}
+                          {signal.entryRule && <div className="px-5 pb-2"><p className="text-slate-500 text-[11px] leading-relaxed">入場：{signal.entryRule}</p></div>}
+                          {signal.invalidation && <div className="px-5 pb-4"><p className="text-red-300/80 text-[11px] leading-relaxed">失效：{signal.invalidation}</p></div>}
                           <div className="px-5 pb-4 flex items-center justify-between">
-                            <div className="flex items-center gap-1.5 text-slate-500 text-xs"><Clock className="w-3 h-3" />當日</div>
+                            <div className="flex items-center gap-1.5 text-slate-500 text-xs"><Clock className="w-3 h-3" />日內計劃</div>
                             {signal.result_pct !== null && (
                               <div className={`flex items-center gap-1 text-sm font-bold ${signal.result_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                 {signal.result_pct >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
@@ -631,8 +666,8 @@ export default function DashboardPage() {
               <div>
                 <p className="text-amber-400 font-medium">指數 / 槓桿ETF 掃描</p>
                 <p className="text-slate-400 text-sm">
-                  分析道指(DIA)、納指(QQQ)、TQQQ、SQQQ、UVIX 過去5年ATR、均線同支持/阻力，
-                  道指同UVIX預設做空策略。建議價僅供參考，槓桿ETF長線持有有波動耗損風險。
+                  以 TQQQ 已完成日線的均線、ATR、RSI、布林通道和確認支持／阻力作風險計劃分析。
+                  系統只會在趨勢、支持、反轉確認和風險回報同時成立時顯示交易計劃；否則顯示觀察或不交易。
                 </p>
               </div>
             </div>
@@ -672,6 +707,18 @@ export default function DashboardPage() {
                   const resistance = r.resistanceLevels?.[0]?.avg;
                   const buyPrice = r.recommendation?.nextBuyPrice;
                   const sellPrice = r.recommendation?.nextSellPrice;
+                  const plan = r.recommendation?.tradePlan;
+                  const recommendationStatus = r.recommendation?.status || 'NO_TRADE';
+                  const statusStyle = recommendationStatus === 'TRADEABLE'
+                    ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                    : recommendationStatus === 'WATCH'
+                      ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+                      : 'text-slate-400 bg-slate-500/10 border-slate-500/20';
+                  const statusLabel = recommendationStatus === 'TRADEABLE'
+                    ? '可建立計劃'
+                    : recommendationStatus === 'WATCH'
+                      ? '等待確認'
+                      : '不交易';
 
                   return (
                     <div key={r.symbol} className={`bg-[#0d1224] border rounded-2xl overflow-hidden ${isLong ? 'border-emerald-400/30' : 'border-red-400/30'}`}>
@@ -685,25 +732,40 @@ export default function DashboardPage() {
                             <div className="text-slate-500 text-xs">{r.name}</div>
                           </div>
                         </div>
-                        <span className={`text-xs font-medium ${trendInfo.color}`}>{trendInfo.label}</span>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className={`text-xs font-medium ${trendInfo.color}`}>{trendInfo.label}</span>
+                            <span className={`border text-[10px] font-bold px-2 py-0.5 rounded-full ${statusStyle}`}>{statusLabel}</span>
+                          </div>
                       </div>
 
                       <div className="px-5 py-4 grid grid-cols-3 gap-3">
                         <div>
                           <div className="text-slate-400 text-xs mb-1">現價</div>
                           <div className="text-white font-bold text-lg">${r.latestClose.toFixed(2)}</div>
+                          <div className="text-slate-500 text-[10px] mt-1">{r.data?.priceSource === 'twelve_data_price' ? 'price endpoint' : `收市 ${r.data?.lastCompletedDailyBar || r.latestDate}`}</div>
                         </div>
                         <div>
-                          <div className="text-slate-400 text-xs mb-1">{isLong ? '建議買入' : '建議做空'}</div>
-                          <div className="text-white font-bold text-lg">${buyPrice != null ? (isLong ? buyPrice : sellPrice)?.toFixed(2) : '—'}</div>
+                          <div className="text-slate-400 text-xs mb-1">觸發入場</div>
+                          <div className="text-white font-bold text-lg">{buyPrice != null ? buyPrice.toFixed(2) : '—'}</div>
                         </div>
                         <div>
-                          <div className="text-slate-400 text-xs mb-1">{isLong ? '建議賣出' : '建議回補'}</div>
+                          <div className="text-slate-400 text-xs mb-1">目標一</div>
                           <div className={`font-bold text-lg ${isLong ? 'text-emerald-400' : 'text-red-400'}`}>
-                            ${sellPrice != null ? (isLong ? sellPrice : buyPrice)?.toFixed(2) : '—'}
+                            {sellPrice != null ? sellPrice.toFixed(2) : '—'}
                           </div>
                         </div>
                       </div>
+
+                      {plan ? (
+                        <div className="px-5 pb-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">止蝕／失效</div><div className="text-red-400 font-bold text-sm">${plan.initialStop.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">每股風險</div><div className="text-slate-200 font-bold text-sm">${plan.riskPerShare.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">目標二</div><div className="text-emerald-300 font-bold text-sm">${plan.target2.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">回報／風險</div><div className="text-amber-400 font-bold text-sm">{plan.rewardRiskToT1.toFixed(2)}R</div></div>
+                        </div>
+                      ) : (
+                        <div className="px-5 pb-3 text-xs text-slate-400">{r.recommendation?.reasons?.[0] || '目前未符合建立交易計劃的條件。'}</div>
+                      )}
 
                       <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                         <div className="bg-white/5 rounded-xl px-3 py-2">
@@ -716,9 +778,21 @@ export default function DashboardPage() {
                         </div>
                       </div>
 
-                      {r.indicators?.volumeSpikeRatio != null && (
-                        <div className="px-5 pb-3 text-xs text-slate-500">
-                          量比 {r.indicators.volumeSpikeRatio.toFixed(2)}x · ATR14 {r.indicators.atr14?.toFixed(2)}
+                      <div className="px-5 pb-3 text-xs text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
+                        {r.indicators?.volumeSpikeRatio != null && <span>量比 {r.indicators.volumeSpikeRatio.toFixed(2)}x</span>}
+                        {r.indicators?.atr14 != null && <span>ATR14 {r.indicators.atr14.toFixed(2)}</span>}
+                        {r.indicators?.rsi14 != null && <span>RSI14 {r.indicators.rsi14.toFixed(1)}</span>}
+                        {plan && <span>最長持有 {plan.maxHoldingDays} 日</span>}
+                      </div>
+
+                      {r.strategyBacktest && (
+                        <div className="mx-5 mb-3 rounded-xl border border-white/5 bg-white/[0.02] p-3">
+                          <div className="text-slate-400 text-[10px] mb-2">固定規則交易級回測（成本後）</div>
+                          <div className="grid grid-cols-2 gap-2 text-[11px]">
+                            <div><span className="text-slate-500">研究樣本</span><span className="ml-2 text-slate-300">{r.strategyBacktest.inSample.trades}單 · {r.strategyBacktest.inSample.avgR ?? '—'}R</span></div>
+                            <div><span className="text-slate-500">OOS</span><span className="ml-2 text-slate-300">{r.strategyBacktest.outOfSample.trades}單 · {r.strategyBacktest.outOfSample.avgR ?? '—'}R</span></div>
+                          </div>
+                          <p className="text-slate-600 text-[10px] mt-2 leading-relaxed">{r.strategyBacktest.validationNote}</p>
                         </div>
                       )}
 
