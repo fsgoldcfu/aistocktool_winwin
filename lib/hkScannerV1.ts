@@ -1,4 +1,4 @@
-/**
+**
  * HK Scanner V1 - 港股短炒推介引擎
  *
  * 結構同 lib/usScannerV3_7.ts 一致，方便日後維護同比對邏輯，
@@ -12,6 +12,7 @@
  */
 
 import { hkStockData, type HKCandle as Candle, type HKQuote as Quote, type HKIndicators as Indicators } from "./hkStockData";
+import { buildLongIntradayRiskPlan } from "./shortTermRisk";
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedHKScanResult: { result: any; timestamp: number } | null = null;
@@ -32,7 +33,9 @@ const HK_CONFIG = {
   expectedPositionsToBuy: 2,
 
   positionsCount: 5,
-  maxStopLossPercent: 3,
+  maxStopLossPercent: 0.03,
+  minimumRewardRisk: 1.5,
+  maxHoldingMinutes: 120,
   minConfidence: 60,
   thresholdSoftenerEnabled: false,
 
@@ -112,6 +115,9 @@ export interface HKRecommendation {
   confidence: number;
   riskRewardRatio: number;
   isCounterTrend: boolean;
+  entryRule: string;
+  invalidation: string;
+  maxHoldingMinutes: number;
   debugReason?: string;
 }
 
@@ -337,8 +343,8 @@ function buildHKRecommendation(
 ): { recommendation: HKRecommendation | null; debugReason: string } {
   const { quote, indicators, candles, news, volumeRatio, volumeSpike } = data;
   const currentPrice = quote.price;
-  const prevClose = candles[candles.length - 2]?.close || currentPrice;
-  const changePercent = (currentPrice - prevClose) / prevClose;
+  // 以供應商的前收市變幅判定相對強度，避免未完成日線 bar 改變結果。
+  const changePercent = quote.changePercent;
   const stockName = HK_STOCK_NAMES[symbol] || symbol;
 
   let debugReason = "";
@@ -359,12 +365,22 @@ function buildHKRecommendation(
   const ema10 = closes.length >= 10 ? calculateEMA(closes, 10) : 0;
   const atrPercent = currentPrice > 0 ? (indicators.atr / currentPrice) * 100 : 0;
 
-  const { resistanceLevel, source: resistanceSource } = calculateResistance(candles, currentPrice, indicators.atr);
-  const takeProfitPrice = currentPrice + indicators.atr * 0.5;
-  const stopLossDistance = Math.max(indicators.atr * 0.7, currentPrice * 0.02);
-  const stopLossPrice = currentPrice - stopLossDistance;
+  const riskPlanResult = buildLongIntradayRiskPlan({
+    currentPrice,
+    atr: indicators.atr,
+    candles,
+    tickSize: getTickSize(currentPrice),
+    maxStopLossPercent: HK_CONFIG.maxStopLossPercent,
+    minimumRewardRisk: HK_CONFIG.minimumRewardRisk,
+    maxHoldingMinutes: HK_CONFIG.maxHoldingMinutes,
+  });
+  if (!riskPlanResult.plan) {
+    debugReason = `風險計劃未通過: ${riskPlanResult.reason}`;
+    return { recommendation: null, debugReason };
+  }
+  const { entryPrice: plannedEntryPrice, takeProfitPrice, stopLossPrice, resistanceLevel, resistanceSource, riskRewardRatio, entryRule, invalidation, maxHoldingMinutes } = riskPlanResult.plan;
 
-  const feasibilityInfo = validateProfitFeasibilityHK(currentPrice, takeProfitPrice, thresholdSoftenerActive);
+  const feasibilityInfo = validateProfitFeasibilityHK(plannedEntryPrice, takeProfitPrice, thresholdSoftenerActive);
   if (!feasibilityInfo.feasible) {
     debugReason = `利潤可行性檢查未通過: ${feasibilityInfo.reason}`;
     return { recommendation: null, debugReason };
@@ -403,7 +419,7 @@ function buildHKRecommendation(
     confidence += 15;
   }
 
-  if (isResonance) confidence = 100;
+  if (isResonance) confidence += 5;
 
   if (thresholdSoftenerActive) {
     if (indicators.rsi > 45) {
@@ -415,16 +431,16 @@ function buildHKRecommendation(
   }
 
   confidence = Math.max(0, Math.min(100, confidence));
-
-  const potentialProfit = takeProfitPrice - currentPrice;
-  const potentialLoss = currentPrice - stopLossPrice;
-  const riskRewardRatio = potentialLoss > 0 ? potentialProfit / potentialLoss : 0;
+  if (confidence < HK_CONFIG.minConfidence) {
+    debugReason = `信心 ${confidence} 低於最低 ${HK_CONFIG.minConfidence}，確認訊號不足`;
+    return { recommendation: null, debugReason };
+  }
 
   return {
     recommendation: {
       symbol,
       stockName,
-      currentPrice,
+      currentPrice: plannedEntryPrice,
       change: quote.change,
       changePercent: quote.changePercent,
 
@@ -458,6 +474,9 @@ function buildHKRecommendation(
       confidence,
       riskRewardRatio,
       isCounterTrend,
+      entryRule,
+      invalidation,
+      maxHoldingMinutes,
       debugReason,
     },
     debugReason,
@@ -496,6 +515,23 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     };
     cachedHKScanResult = { result: closedResult, timestamp: Date.now() };
     return closedResult;
+  }
+
+  if (!['opening-hour', 'active-session'].includes(timeInfo.marketPhase)) {
+    return {
+      recommendations: [],
+      scanTime: new Date().toISOString(),
+      hkTime: timeInfo.timeStr,
+      marketPhase: timeInfo.marketPhase,
+      indexChangePercent: 0,
+      totalScanned: 0,
+      stage1Candidates: 0,
+      stage2Candidates: 0,
+      stage3Candidates: 0,
+      stage4Candidates: 0,
+      isDownMarket: false,
+      marketClosedNotice: '港股正規交易時段以外不產生可交易短炒訊號；請於 09:30–12:00 或 13:00–16:00 再掃描。',
+    };
   }
 
   console.log(`[HK Scanner V1] 單注資金: HK$${capitalPerPositionHKD.toFixed(0)}, 最低目標利潤: HK$${minTargetProfitPerStockHKD.toFixed(0)}/股`);
@@ -569,10 +605,8 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
         const data = stockData.get(symbol);
         if (!data) continue;
         const { quote, volumeSpike } = data;
-        const currentPrice = quote.price;
-        const prevClose = data.candles[data.candles.length - 2]?.close || currentPrice;
-        const changePercent = ((currentPrice - prevClose) / prevClose) * 100;
-        if (changePercent > 3 && volumeSpike) sectorSpikesCount++;
+        const changePercent = quote.changePercent;
+        if (changePercent > 0.03 && volumeSpike) sectorSpikesCount++;
       }
 
       if (sectorSpikesCount >= 2) {
@@ -650,7 +684,7 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
         if (a.isCounterTrend && !b.isCounterTrend) return -1;
         if (!a.isCounterTrend && b.isCounterTrend) return 1;
       }
-      return b.expectedProfitHKD - a.expectedProfitHKD || b.confidence - a.confidence;
+      return b.riskRewardRatio - a.riskRewardRatio || b.confidence - a.confidence || b.expectedProfitHKD - a.expectedProfitHKD;
     })
     .slice(0, HK_CONFIG.positionsCount);
 
