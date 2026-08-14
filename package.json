@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:index-analysis": "npx tsx scripts/verify-index-analysis.ts",
+    "verify:short-term-risk": "npx tsx scripts/verify-short-term-risk.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
@@ -72,5 +74,8 @@
     "typescript": "5.2.2",
     "vaul": "^0.9.9",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12"
   }
 }
