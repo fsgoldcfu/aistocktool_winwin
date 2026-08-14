@@ -106,15 +106,27 @@ class HKStockData {
   }
 
   private parseCandles(rawCandles: any[]): Candle[] {
-    const candles: Candle[] = rawCandles.map((c: any) => ({
-      date: new Date(c.t).toISOString().split("T")[0],
-      open: Number(c.o) || 0,
-      high: Number(c.h) || 0,
-      low: Number(c.l) || 0,
-      close: Number(c.c) || 0,
-      volume: Number(c.v) || 0,
-    }));
-    candles.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    if (!Array.isArray(rawCandles)) return [];
+    const seen = new Set<string>();
+    const candles: Candle[] = [];
+    for (const raw of rawCandles) {
+      const date = new Date(raw.t).toISOString().split("T")[0];
+      const open = Number(raw.o);
+      const high = Number(raw.h);
+      const low = Number(raw.l);
+      const close = Number(raw.c);
+      const volume = Number(raw.v || 0);
+      const valid = date && !seen.has(date) && Number.isFinite(open) && Number.isFinite(high)
+        && Number.isFinite(low) && Number.isFinite(close) && open > 0 && high > 0 && low > 0 && close > 0
+        && Number.isFinite(volume) && volume >= 0 && high >= Math.max(open, close) && low <= Math.min(open, close);
+      if (!valid) {
+        console.warn(`[HK Stock Data] 跳過無效日線 bar: ${String(raw.t || 'unknown')}`);
+        continue;
+      }
+      seen.add(date);
+      candles.push({ date, open, high, low, close, volume });
+    }
+    candles.sort((a, b) => a.date.localeCompare(b.date));
     return candles;
   }
 
@@ -138,9 +150,10 @@ class HKStockData {
         if (json.code !== 0 || !json.data) { console.error(`[HK Stock Data] fetchQuote failed for ${symbol}: ${json.msg}`); return null; }
         const d = json.data;
         const price = Number(d.ld) || 0;
-        const open = Number(d.o) || price;
-        const change = price - open;
-        const changePercent = open > 0 ? change / open : 0;
+        // iTick 版本的前收市欄位可能為 pc / preClose / yc；欄位缺失才退回 open。
+        const previousClose = Number(d.pc ?? d.preClose ?? d.yc ?? d.o) || price;
+        const change = price - previousClose;
+        const changePercent = previousClose > 0 ? change / previousClose : 0;
         const quote: Quote = { price, change, changePercent };
         quoteCache.set(code, { data: quote, timestamp: Date.now() });
         return quote;
@@ -182,9 +195,9 @@ class HKStockData {
             : Object.entries(json.data);
           for (const [code, d] of entries as [string, any][]) {
             const price = Number(d.ld) || 0;
-            const open = Number(d.o) || price;
-            const change = price - open;
-            const changePercent = open > 0 ? change / open : 0;
+            const previousClose = Number(d.pc ?? d.preClose ?? d.yc ?? d.o) || price;
+            const change = price - previousClose;
+            const changePercent = previousClose > 0 ? change / previousClose : 0;
             const quote = { price, change, changePercent };
             result.set(String(code), quote);
             quoteCache.set(String(code), { data: quote, timestamp: Date.now() });
@@ -202,7 +215,8 @@ class HKStockData {
   /** 單一股票歷史K線（fallback用） */
   async fetchHistoricalData(symbol: string, period: string): Promise<Candle[]> {
     const code = this.normalizeSymbol(symbol);
-    const cached = historicalCache.get(code);
+    const cacheKey = `${code}:${period}`;
+    const cached = historicalCache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < HISTORICAL_CACHE_TTL_MS) return cached.data;
     const kType = K_TYPE_MAP["1day"];
     const limit = this.periodToLimit(period);
@@ -216,7 +230,7 @@ class HKStockData {
         if (json.code !== 0 || !json.data) { console.error(`[HK Stock Data] fetchHistoricalData failed for ${symbol}: ${json.msg}`); return []; }
         const rawCandles = Array.isArray(json.data) ? json.data : json.data[code] || [];
         const candles = this.parseCandles(rawCandles);
-        historicalCache.set(code, { data: candles, timestamp: Date.now() });
+        historicalCache.set(cacheKey, { data: candles, timestamp: Date.now() });
         return candles;
       } catch (error) {
         console.error(`[HK Stock Data] fetchHistoricalData error for ${symbol}:`, error);
@@ -254,7 +268,7 @@ class HKStockData {
           if (rawCandles && Array.isArray(rawCandles)) {
             const candles = this.parseCandles(rawCandles);
             result.set(code, candles);
-            historicalCache.set(code, { data: candles, timestamp: Date.now() });
+            historicalCache.set(`${code}:${period}`, { data: candles, timestamp: Date.now() });
           }
         }
         console.log(`[HK Stock Data] ✅ 批量K線攞到 ${result.size} 隻股票`);
