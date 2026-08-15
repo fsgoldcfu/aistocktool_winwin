@@ -17,7 +17,7 @@
 
 // ==================== 真實數據源（Finnhub API） ====================
 import { yfinanceData as financeAPI } from "./yfinanceData";
-import { buildLongIntradayRiskPlan, calculateTradeabilityScore } from './shortTermRisk';
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateNetProfitEligibility } from './shortTermRisk';
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedScanResult: { result: any; timestamp: number } | null = null;
@@ -105,6 +105,8 @@ const CONFIG = {
   maxHoldingMinutes: 90,          // intraday time stop，避免訊號變成無限期持倉
   minConfidence: 60,              // Minimum strategy confirmation score
   tradeabilityThreshold: 60,     // Minimum daily execution score
+  minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 1000),
+  estimatedOneWayCostBps: Number(process.env.US_ONE_WAY_COST_BPS ?? 12),
   thresholdSoftenerEnabled: false, // 降維試槍開關
 
   // ===== 逆市股偵測（跌市優先推介逆市股）=====
@@ -214,7 +216,10 @@ export interface V3_7Recommendation {
   debugReason?: string; // Added for debugging
 
   capitalAllocatedHKD: number;  // 港幣顯示，方便對照實際資金
-  expectedProfitHKD: number;    // 港幣顯示，方便對照實際利潤
+  expectedProfitHKD: number;    // 結構目標的估計毛利（未扣成本）
+  estimatedCostsHKD: number;    // 以配置假設計算的買入及賣出成本
+  estimatedNetProfitHKD: number; // 結構目標的估計成本後淨盈利（非保證）
+  minimumNetProfitHKD: number;
   isCounterTrend: boolean;      // 是否為「逆市抗跌股」
   entryRule: string;
   invalidation: string;
@@ -640,16 +645,7 @@ function validateProfitFeasibility(
   let actualCapitalAllocated = 0;
   let feasibilityReason = "";
 
-  let currentMinTargetProfit = minTargetProfitPerStockUSD;
-  // 核心修正: 超過 23:30 HKT，提高預期利潤門檻
-  if (hkHour >= 23 || hkHour < 4) { // Covers 23:30 HKT to 04:00 HKT
-    currentMinTargetProfit = minTargetProfitPerStockUSD * 1.2;
-  }
-
-  // 降維試槍開關: 當開關啟用時，利潤硬門檻打 8 折
-  if (thresholdSoftenerActive) {
-    currentMinTargetProfit *= 0.8;
-  }
+  
 
   for (const capital of capitalOptions) {
     const sharesCanBuy = Math.floor(capital / currentPrice);
@@ -661,7 +657,7 @@ function validateProfitFeasibility(
 
     const currentExpectedProfit = (takeProfitPrice - currentPrice) * sharesCanBuy;
 
-    if (currentExpectedProfit >= currentMinTargetProfit && sharesCanBuy > bestShares) {
+    if (sharesCanBuy > bestShares) {
       bestShares = sharesCanBuy;
       bestExpectedProfit = currentExpectedProfit;
       actualCapitalAllocated = capital;
@@ -669,14 +665,14 @@ function validateProfitFeasibility(
   }
 
   if (bestShares === 0) {
-    return { feasible: false, sharesCanBuy: 0, expectedProfit: 0, capitalAllocated: 0, lotSize, reason: feasibilityReason || `Cannot meet min profit (${currentMinTargetProfit.toFixed(0)} USD) or buy 1 share` };
+    return { feasible: false, sharesCanBuy: 0, expectedProfit: 0, capitalAllocated: 0, lotSize, reason: feasibilityReason || '資金不足以買入 1 股。' };
   }
 
   const tickSize = getTickSize(currentPrice);
   const ticksAvailable = Math.floor((takeProfitPrice - currentPrice) / tickSize);
   
-  let feasible = bestExpectedProfit >= currentMinTargetProfit && ticksAvailable >= 1;
-  feasibilityReason = feasible ? "Meets profit requirements" : `Expected profit (${bestExpectedProfit.toFixed(0)} USD) below ${currentMinTargetProfit.toFixed(0)} USD threshold`;
+  let feasible = ticksAvailable >= 1;
+  feasibilityReason = feasible ? '有至少一個有效價格跳動，下一步交由成本後淨盈利門檻判定。' : '結構目標不足一個有效價格跳動。';
 
   // Module 4: 放寬高價股鐵鎖 (Price > $100) 必須滿足「利潤百分比 > 1.0%」
   if (feasible && currentPrice > 100) {
@@ -801,8 +797,23 @@ function buildRecommendation(
   }
 
   // ===== 港幣顯示換算 + 逆市抗跌股判定 =====
+  const netProfitEligibility = evaluateNetProfitEligibility({
+    entryPrice: plannedEntryPrice,
+    targetPrice: takeProfitPrice,
+    shares: feasibilityInfo.sharesCanBuy,
+    oneWayCostBps: CONFIG.estimatedOneWayCostBps,
+    fxToHKD: CONFIG.hkdToUsdRate,
+    minimumNetProfitHKD: CONFIG.minimumNetProfitHKD,
+  });
+  if (!netProfitEligibility.feasible) {
+    debugReason = `成本後淨盈利檢查未通過: ${netProfitEligibility.reason}`;
+    return { recommendation: null, debugReason };
+  }
+
   const capitalAllocatedHKD = feasibilityInfo.capitalAllocated * CONFIG.hkdToUsdRate;
-  const expectedProfitHKD = feasibilityInfo.expectedProfit * CONFIG.hkdToUsdRate;
+  const expectedProfitHKD = netProfitEligibility.estimatedGrossProfitHKD;
+  const estimatedCostsHKD = netProfitEligibility.estimatedCostsHKD;
+  const estimatedNetProfitHKD = netProfitEligibility.estimatedNetProfitHKD;
   const isCounterTrend = indexChangePercent <= CONFIG.downMarketThreshold &&
     (changePercent - indexChangePercent) >= CONFIG.counterTrendRelativeStrength;
 
@@ -912,7 +923,7 @@ function buildRecommendation(
       sharesCanBuy: feasibilityInfo.sharesCanBuy,
       expectedProfit: feasibilityInfo.expectedProfit,
       capitalAllocated: feasibilityInfo.capitalAllocated,
-      profitFeasible: feasibilityInfo.feasible,
+      profitFeasible: netProfitEligibility.feasible,
       
       rsi: indicators.rsi,
       ema10,
@@ -938,6 +949,9 @@ function buildRecommendation(
 
       capitalAllocatedHKD,
       expectedProfitHKD,
+      estimatedCostsHKD,
+      estimatedNetProfitHKD,
+      minimumNetProfitHKD: netProfitEligibility.minimumNetProfitHKD,
       isCounterTrend,
     },
     debugReason: debugReason
