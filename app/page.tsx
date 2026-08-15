@@ -38,6 +38,9 @@ interface SignalWithStages extends StockSignal {
   isNearMiss?: boolean;
   capitalAllocatedHKD?: number;
   expectedProfitHKD?: number;
+  estimatedCostsHKD?: number;
+  estimatedNetProfitHKD?: number;
+  minimumNetProfitHKD?: number;
   isCounterTrend?: boolean;
   tradeabilityScore?: number;
   tradeabilityReason?: string;
@@ -466,7 +469,7 @@ export default function DashboardPage() {
                   const upside = (((signal.target_price - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
                   const downside = (((signal.stop_loss - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
                   const statusInfo = STATUS_LABELS[signal.status];
-                  const hasCapitalInfo = typeof signal.capitalAllocatedHKD === 'number' && typeof signal.expectedProfitHKD === 'number';
+                  const hasCapitalInfo = typeof signal.capitalAllocatedHKD === 'number' && typeof signal.estimatedNetProfitHKD === 'number';
 
                   return (
                     <div key={signal.id} className={`bg-[#0d1224] border rounded-2xl overflow-hidden transition-all ${signal.isCounterTrend ? 'border-cyan-400/40' : signal.isNearMiss ? 'border-amber-500/30' : signal.isFallback ? 'border-blue-500/30' : 'border-white/10 hover:border-white/20'} ${isLocked ? 'opacity-60' : ''}`}>
@@ -500,9 +503,10 @@ export default function DashboardPage() {
                           {hasCapitalInfo && (
                             <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                               <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">配置參考</div><div className="text-white font-bold text-sm">HK${signal.capitalAllocatedHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
-                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">目標毛利參考</div><div className="text-emerald-400 font-bold text-sm">HK${signal.expectedProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+                              <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">結構目標成本後淨盈利</div><div className="text-emerald-400 font-bold text-sm">HK${signal.estimatedNetProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
                             </div>
                           )}
+                          {hasCapitalInfo && <p className="px-5 pb-3 text-[10px] leading-relaxed text-slate-500">已扣估計買入及賣出成本 HK${(signal.estimatedCostsHKD ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}；只在成本後目標至少 HK${(signal.minimumNetProfitHKD ?? 1000).toLocaleString()} 時推介。目標價並非保證成交。</p>}
                           {typeof signal.riskRewardRatio === 'number' && (
                             <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                               <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">回報／風險</div><div className="text-amber-400 font-bold text-sm">{signal.riskRewardRatio.toFixed(2)}R</div></div>
