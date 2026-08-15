@@ -12,7 +12,7 @@
  */
 
 import { hkStockData, type HKCandle as Candle, type HKQuote as Quote, type HKIndicators as Indicators } from "./hkStockData";
-import { buildLongIntradayRiskPlan, calculateTradeabilityScore } from "./shortTermRisk";
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateNetProfitEligibility } from "./shortTermRisk";
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedHKScanResult: { result: any; timestamp: number } | null = null;
@@ -38,6 +38,8 @@ const HK_CONFIG = {
   maxHoldingMinutes: 120,
   minConfidence: 60,
   tradeabilityThreshold: 60,
+  minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 1000),
+  estimatedOneWayCostBps: Number(process.env.HK_ONE_WAY_COST_BPS ?? 20),
   thresholdSoftenerEnabled: false,
 
   downMarketThreshold: -0.003,        // 恒指跌幅 > 0.3% 視為跌市
@@ -97,7 +99,10 @@ export interface HKRecommendation {
 
   lotSize: number;
   sharesCanBuy: number;
-  expectedProfitHKD: number;
+  expectedProfitHKD: number; // 結構目標的估計毛利（未扣成本）
+  estimatedCostsHKD: number;
+  estimatedNetProfitHKD: number; // 結構目標的估計成本後淨盈利（非保證）
+  minimumNetProfitHKD: number;
   capitalAllocatedHKD: number;
   profitFeasible: boolean;
 
@@ -265,42 +270,46 @@ function calculateResistance(
   return { resistanceLevel: takeProfitPrice, source: "ATR Target (Fallback)" };
 }
 
+function getConfiguredHKBoardLot(symbol: string): number | null {
+  try {
+    const raw = process.env.HK_BOARD_LOT_MAP_JSON;
+    if (!raw) return null;
+    const map = JSON.parse(raw) as Record<string, unknown>;
+    const lotSize = Number(map[symbol]);
+    return Number.isInteger(lotSize) && lotSize > 0 ? lotSize : null;
+  } catch {
+    return null;
+  }
+}
+
 function validateProfitFeasibilityHK(
+  symbol: string,
   currentPrice: number,
   takeProfitPrice: number,
-  thresholdSoftenerActive: boolean
 ): { feasible: boolean; sharesCanBuy: number; expectedProfitHKD: number; capitalAllocatedHKD: number; lotSize: number; reason: string } {
-  // 港股一手股數因股票而異，呢度簡化做1手=1股，方便計算；
-  // 實際下單時要按交易所公佈嘅每手股數調整（例如騰訊一手100股）。
-  const lotSize = 1;
-  const capital = capitalPerPositionHKD;
-
-  let currentMinTargetProfit = minTargetProfitPerStockHKD;
-  if (thresholdSoftenerActive) {
-    currentMinTargetProfit *= 0.8;
+  const lotSize = getConfiguredHKBoardLot(symbol);
+  if (!lotSize) {
+    return { feasible: false, sharesCanBuy: 0, expectedProfitHKD: 0, capitalAllocatedHKD: 0, lotSize: 0, reason: `未設定 ${symbol} 的真實每手股數（HK_BOARD_LOT_MAP_JSON）；不能把 1 手當作 1 股。` };
   }
 
-  const sharesCanBuy = Math.floor(capital / currentPrice);
-  if (sharesCanBuy === 0) {
-    return { feasible: false, sharesCanBuy: 0, expectedProfitHKD: 0, capitalAllocatedHKD: 0, lotSize, reason: `資金(${capital.toFixed(0)} HKD)不足以買1股` };
+  const sharesCanBuy = Math.floor(capitalPerPositionHKD / currentPrice / lotSize) * lotSize;
+  if (sharesCanBuy <= 0) {
+    return { feasible: false, sharesCanBuy: 0, expectedProfitHKD: 0, capitalAllocatedHKD: 0, lotSize, reason: `每注資金 HK$${capitalPerPositionHKD.toFixed(0)} 不足以買入 ${symbol} 的一手 ${lotSize} 股。` };
   }
 
   const expectedProfitHKD = (takeProfitPrice - currentPrice) * sharesCanBuy;
   const tickSize = getTickSize(currentPrice);
   const ticksAvailable = Math.floor((takeProfitPrice - currentPrice) / tickSize);
-
-  let feasible = expectedProfitHKD >= currentMinTargetProfit && ticksAvailable >= 1;
-  let reason = feasible ? "符合利潤要求" : `預期利潤(${expectedProfitHKD.toFixed(0)} HKD)未達${currentMinTargetProfit.toFixed(0)} HKD門檻`;
-
-  if (feasible && currentPrice > 50) {
-    const profitPercentage = (takeProfitPrice - currentPrice) / currentPrice;
-    if (profitPercentage < 0.01) {
-      feasible = false;
-      reason = `高價股(>${currentPrice.toFixed(2)} HKD)利潤百分比(${(profitPercentage * 100).toFixed(2)}%)低於1.0%門檻`;
-    }
-  }
-
-  return { feasible, sharesCanBuy, expectedProfitHKD, capitalAllocatedHKD: feasible ? capital : 0, lotSize, reason };
+  const feasible = ticksAvailable >= 1;
+  const capitalAllocatedHKD = sharesCanBuy * currentPrice;
+  return {
+    feasible,
+    sharesCanBuy,
+    expectedProfitHKD,
+    capitalAllocatedHKD,
+    lotSize,
+    reason: feasible ? '有至少一個有效價格跳動，下一步交由成本後淨盈利門檻判定。' : '結構目標不足一個有效價格跳動。',
+  };
 }
 
 interface HKStockDataBundle {
@@ -385,9 +394,21 @@ function buildHKRecommendation(
   }
   const { entryPrice: plannedEntryPrice, takeProfitPrice, stopLossPrice, resistanceLevel, resistanceSource, riskRewardRatio, entryRule, invalidation, maxHoldingMinutes } = riskPlanResult.plan;
 
-  const feasibilityInfo = validateProfitFeasibilityHK(plannedEntryPrice, takeProfitPrice, thresholdSoftenerActive);
+  const feasibilityInfo = validateProfitFeasibilityHK(symbol, plannedEntryPrice, takeProfitPrice);
   if (!feasibilityInfo.feasible) {
     debugReason = `利潤可行性檢查未通過: ${feasibilityInfo.reason}`;
+    return { recommendation: null, debugReason };
+  }
+
+  const netProfitEligibility = evaluateNetProfitEligibility({
+    entryPrice: plannedEntryPrice,
+    targetPrice: takeProfitPrice,
+    shares: feasibilityInfo.sharesCanBuy,
+    oneWayCostBps: HK_CONFIG.estimatedOneWayCostBps,
+    minimumNetProfitHKD: HK_CONFIG.minimumNetProfitHKD,
+  });
+  if (!netProfitEligibility.feasible) {
+    debugReason = `成本後淨盈利檢查未通過: ${netProfitEligibility.reason}`;
     return { recommendation: null, debugReason };
   }
 
@@ -473,9 +494,12 @@ function buildHKRecommendation(
 
       lotSize: feasibilityInfo.lotSize,
       sharesCanBuy: feasibilityInfo.sharesCanBuy,
-      expectedProfitHKD: feasibilityInfo.expectedProfitHKD,
+      expectedProfitHKD: netProfitEligibility.estimatedGrossProfitHKD,
+      estimatedCostsHKD: netProfitEligibility.estimatedCostsHKD,
+      estimatedNetProfitHKD: netProfitEligibility.estimatedNetProfitHKD,
+      minimumNetProfitHKD: netProfitEligibility.minimumNetProfitHKD,
       capitalAllocatedHKD: feasibilityInfo.capitalAllocatedHKD,
-      profitFeasible: feasibilityInfo.feasible,
+      profitFeasible: netProfitEligibility.feasible,
 
       rsi: indicators.rsi,
       ema10,
