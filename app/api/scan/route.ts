@@ -36,6 +36,8 @@ export async function POST(req: NextRequest) {
       entryRule: rec.entryRule,
       invalidation: rec.invalidation,
       maxHoldingMinutes: rec.maxHoldingMinutes,
+      tradeabilityScore: rec.tradeabilityScore,
+      tradeabilityReason: rec.tradeabilityReason,
       resistanceLevel: rec.resistanceLevel,
       resistanceSource: rec.resistanceSource,
     }));
@@ -49,6 +51,8 @@ export async function POST(req: NextRequest) {
         isDownMarket: result.isDownMarket,
         marketPhase: result.marketPhase,
         marketClosedNotice: result.marketClosedNotice || null,
+        tradeabilityThreshold: result.tradeabilityThreshold,
+        qualifiedCandidates: result.qualifiedCandidates,
         generatedAt,
       },
       { headers: { 'Cache-Control': 'no-store, max-age=0' } }
