@@ -17,7 +17,7 @@
 
 // ==================== 真實數據源（Finnhub API） ====================
 import { yfinanceData as financeAPI } from "./yfinanceData";
-import { buildLongIntradayRiskPlan } from "./shortTermRisk";
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore } from './shortTermRisk';
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedScanResult: { result: any; timestamp: number } | null = null;
@@ -103,7 +103,8 @@ const CONFIG = {
   maxStopLossPercent: 0.03,      // 以小數表示：最多 3% 初始風險
   minimumRewardRisk: 1.5,         // 最低 1.5R，否則不推介
   maxHoldingMinutes: 90,          // intraday time stop，避免訊號變成無限期持倉
-  minConfidence: 60,              // Minimum confidence score
+  minConfidence: 60,              // Minimum strategy confirmation score
+  tradeabilityThreshold: 60,     // Minimum daily execution score
   thresholdSoftenerEnabled: false, // 降維試槍開關
 
   // ===== 逆市股偵測（跌市優先推介逆市股）=====
@@ -218,6 +219,8 @@ export interface V3_7Recommendation {
   entryRule: string;
   invalidation: string;
   maxHoldingMinutes: number;
+  tradeabilityScore: number;
+  tradeabilityReason: string;
 }
 
 export interface ScanResult {
@@ -233,6 +236,8 @@ export interface ScanResult {
   stage4Candidates: number;
   thresholdSoftenerActive: boolean; // 降維試槍開關狀態
   isDownMarket?: boolean;           // 是否為跌市模式
+  tradeabilityThreshold: number;
+  qualifiedCandidates: number;
   marketClosedNotice?: string;
 }
 
@@ -872,6 +877,19 @@ function buildRecommendation(
     debugReason = `Confidence ${confidence} below minimum ${CONFIG.minConfidence}; not enough independent confirmations.`;
     return { recommendation: null, debugReason };
   }
+
+  const tradeability = calculateTradeabilityScore({
+    volumeRatio,
+    relativeStrength: changePercent - indexChangePercent,
+    atrPercent,
+    riskRewardRatio,
+    isCounterTrend,
+  }, CONFIG.tradeabilityThreshold);
+  if (!tradeability.passed) {
+    debugReason = tradeability.reason;
+    return { recommendation: null, debugReason };
+  }
+  triggerReason += ` | ${tradeability.reason}`;
   
   return {
     recommendation: {
@@ -915,6 +933,8 @@ function buildRecommendation(
       entryRule,
       invalidation,
       maxHoldingMinutes,
+      tradeabilityScore: tradeability.score,
+      tradeabilityReason: tradeability.reason,
 
       capitalAllocatedHKD,
       expectedProfitHKD,
@@ -958,6 +978,8 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
       stage4Candidates: 0,
       thresholdSoftenerActive: thresholdSoftenerActive,
       isDownMarket: false,
+      tradeabilityThreshold: CONFIG.tradeabilityThreshold,
+      qualifiedCandidates: 0,
       marketClosedNotice: "美股今日休市（週末），請於美股交易日（香港時間星期一21:30 - 星期六04:00）再嘗試掃描。",
     };
     cachedScanResult = { result: closedResult, timestamp: Date.now() };
@@ -978,6 +1000,8 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
       stage4Candidates: 0,
       thresholdSoftenerActive,
       isDownMarket: false,
+      tradeabilityThreshold: CONFIG.tradeabilityThreshold,
+      qualifiedCandidates: 0,
       marketClosedNotice: '美股正規交易時段以外不產生可交易短炒訊號；請待美東 09:30–16:00 再掃描。',
     };
   }
@@ -1121,14 +1145,18 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     }
   }
 
-  // Final selection: 跌市優先逆市抗跌股，再按預期利潤/信心排序
+  // 只由已通過 Tradeability Score 的候選中最多選 5 隻；少於 5 隻或 0 隻均為正常結果。
   const finalRecommendations = recommendations
+    .filter((recommendation) => recommendation.tradeabilityScore >= CONFIG.tradeabilityThreshold)
     .sort((a, b) => {
       if (isDownMarket) {
         if (a.isCounterTrend && !b.isCounterTrend) return -1;
         if (!a.isCounterTrend && b.isCounterTrend) return 1;
       }
-      return b.riskRewardRatio - a.riskRewardRatio || b.confidence - a.confidence || b.expectedProfit - a.expectedProfit;
+      return b.tradeabilityScore - a.tradeabilityScore
+        || b.riskRewardRatio - a.riskRewardRatio
+        || b.confidence - a.confidence
+        || b.expectedProfit - a.expectedProfit;
     })
     .slice(0, CONFIG.positionsCount); // Target 5 stocks
   
@@ -1158,6 +1186,8 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     stage4Candidates: stage4CandidatesCount,
     thresholdSoftenerActive: thresholdSoftenerActive,
     isDownMarket,
+    tradeabilityThreshold: CONFIG.tradeabilityThreshold,
+    qualifiedCandidates: recommendations.filter((recommendation) => recommendation.tradeabilityScore >= CONFIG.tradeabilityThreshold).length,
   };
 
   // 存入 Cache，15分鐘內重複請求直接返回
