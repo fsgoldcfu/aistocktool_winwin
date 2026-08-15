@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildLongIntradayRiskPlan } from '../lib/shortTermRisk';
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore } from '../lib/shortTermRisk';
 
 const qualifyingCandles = [
   { high: 100, low: 96 },
@@ -47,5 +47,22 @@ const stopTooWideResult = buildLongIntradayRiskPlan({
   maxHoldingMinutes: 90,
 });
 assert.equal(stopTooWideResult.plan, null, 'ATR risk beyond configured cap must fail closed');
+
+const passingScore = calculateTradeabilityScore({
+  volumeRatio: 1.8,
+  relativeStrength: 0.015,
+  atrPercent: 2,
+  riskRewardRatio: 2,
+});
+assert.equal(passingScore.passed, true, 'liquid, relatively strong, tradable volatility and 2R setup should pass');
+assert.ok(passingScore.score >= passingScore.threshold, 'passing score must meet its configured threshold');
+
+const rejectedScore = calculateTradeabilityScore({
+  volumeRatio: 0.8,
+  relativeStrength: 0.002,
+  atrPercent: 0.4,
+  riskRewardRatio: 1.2,
+});
+assert.equal(rejectedScore.passed, false, 'weak liquidity and insufficient R must fail closed');
 
 console.log('shortTermRisk verification passed');
