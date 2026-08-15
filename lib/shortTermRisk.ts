@@ -173,3 +173,81 @@ export function calculateTradeabilityScore(
     reason: `${passed ? '通過' : '未通過'} Tradeability Score ${score}/${threshold}（${reasons.join('；')}）`,
   };
 }
+
+export interface NetProfitEligibilityInput {
+  entryPrice: number;
+  targetPrice: number;
+  shares: number;
+  oneWayCostBps: number;
+  fxToHKD?: number;
+  minimumNetProfitHKD: number;
+}
+
+export interface NetProfitEligibilityResult {
+  feasible: boolean;
+  grossProfitLocal: number;
+  estimatedCostsLocal: number;
+  estimatedNetProfitLocal: number;
+  estimatedGrossProfitHKD: number;
+  estimatedCostsHKD: number;
+  estimatedNetProfitHKD: number;
+  minimumNetProfitHKD: number;
+  reason: string;
+}
+
+/**
+ * 以入場及結構目標計算「估計成本後」淨盈利資格。
+ * 這是推薦的硬性門檻，不預測目標一定會被觸及；成本 bps 必須按實際 broker、spread 與滑點校準。
+ */
+export function evaluateNetProfitEligibility(input: NetProfitEligibilityInput): NetProfitEligibilityResult {
+  const fxToHKD = input.fxToHKD ?? 1;
+  const entryPrice = Number(input.entryPrice);
+  const targetPrice = Number(input.targetPrice);
+  const shares = Math.floor(Number(input.shares));
+  const oneWayCostBps = Number(input.oneWayCostBps);
+  const minimumNetProfitHKD = Number(input.minimumNetProfitHKD);
+
+  if (
+    !Number.isFinite(entryPrice) || entryPrice <= 0 ||
+    !Number.isFinite(targetPrice) || targetPrice <= entryPrice ||
+    !Number.isFinite(shares) || shares <= 0 ||
+    !Number.isFinite(oneWayCostBps) || oneWayCostBps < 0 ||
+    !Number.isFinite(fxToHKD) || fxToHKD <= 0 ||
+    !Number.isFinite(minimumNetProfitHKD) || minimumNetProfitHKD <= 0
+  ) {
+    return {
+      feasible: false,
+      grossProfitLocal: 0,
+      estimatedCostsLocal: 0,
+      estimatedNetProfitLocal: 0,
+      estimatedGrossProfitHKD: 0,
+      estimatedCostsHKD: 0,
+      estimatedNetProfitHKD: 0,
+      minimumNetProfitHKD: Number.isFinite(minimumNetProfitHKD) ? minimumNetProfitHKD : 0,
+      reason: '入場價、結構目標、可交易股數、成本假設或淨盈利門檻無效。',
+    };
+  }
+
+  const grossProfitLocal = (targetPrice - entryPrice) * shares;
+  // 每邊成本以各邊成交名義金額估算，避免只扣買入或只扣賣出成本。
+  const estimatedCostsLocal = (entryPrice + targetPrice) * shares * (oneWayCostBps / 10_000);
+  const estimatedNetProfitLocal = grossProfitLocal - estimatedCostsLocal;
+  const estimatedGrossProfitHKD = grossProfitLocal * fxToHKD;
+  const estimatedCostsHKD = estimatedCostsLocal * fxToHKD;
+  const estimatedNetProfitHKD = estimatedNetProfitLocal * fxToHKD;
+  const feasible = estimatedNetProfitHKD >= minimumNetProfitHKD;
+
+  return {
+    feasible,
+    grossProfitLocal,
+    estimatedCostsLocal,
+    estimatedNetProfitLocal,
+    estimatedGrossProfitHKD,
+    estimatedCostsHKD,
+    estimatedNetProfitHKD,
+    minimumNetProfitHKD,
+    reason: feasible
+      ? `結構目標的估計成本後淨盈利 HK$${estimatedNetProfitHKD.toFixed(0)}，達到 HK$${minimumNetProfitHKD.toFixed(0)} 推薦門檻。`
+      : `結構目標的估計成本後淨盈利只有 HK$${estimatedNetProfitHKD.toFixed(0)}，低於 HK$${minimumNetProfitHKD.toFixed(0)} 推薦門檻。`,
+  };
+}
