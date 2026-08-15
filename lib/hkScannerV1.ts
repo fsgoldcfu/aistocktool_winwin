@@ -1,4 +1,4 @@
-**
+/**
  * HK Scanner V1 - 港股短炒推介引擎
  *
  * 結構同 lib/usScannerV3_7.ts 一致，方便日後維護同比對邏輯，
@@ -12,7 +12,7 @@
  */
 
 import { hkStockData, type HKCandle as Candle, type HKQuote as Quote, type HKIndicators as Indicators } from "./hkStockData";
-import { buildLongIntradayRiskPlan } from "./shortTermRisk";
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore } from "./shortTermRisk";
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedHKScanResult: { result: any; timestamp: number } | null = null;
@@ -37,6 +37,7 @@ const HK_CONFIG = {
   minimumRewardRisk: 1.5,
   maxHoldingMinutes: 120,
   minConfidence: 60,
+  tradeabilityThreshold: 60,
   thresholdSoftenerEnabled: false,
 
   downMarketThreshold: -0.003,        // 恒指跌幅 > 0.3% 視為跌市
@@ -118,6 +119,8 @@ export interface HKRecommendation {
   entryRule: string;
   invalidation: string;
   maxHoldingMinutes: number;
+  tradeabilityScore: number;
+  tradeabilityReason: string;
   debugReason?: string;
 }
 
@@ -133,6 +136,8 @@ export interface HKScanResult {
   stage3Candidates: number;
   stage4Candidates: number;
   isDownMarket: boolean;
+  tradeabilityThreshold: number;
+  qualifiedCandidates: number;
   marketClosedNotice?: string;
 }
 
@@ -436,6 +441,19 @@ function buildHKRecommendation(
     return { recommendation: null, debugReason };
   }
 
+  const tradeability = calculateTradeabilityScore({
+    volumeRatio,
+    relativeStrength: changePercent - indexChangePercent,
+    atrPercent,
+    riskRewardRatio,
+    isCounterTrend,
+  }, HK_CONFIG.tradeabilityThreshold);
+  if (!tradeability.passed) {
+    debugReason = tradeability.reason;
+    return { recommendation: null, debugReason };
+  }
+  triggerReason += ` | ${tradeability.reason}`;
+
   return {
     recommendation: {
       symbol,
@@ -477,6 +495,8 @@ function buildHKRecommendation(
       entryRule,
       invalidation,
       maxHoldingMinutes,
+      tradeabilityScore: tradeability.score,
+      tradeabilityReason: tradeability.reason,
       debugReason,
     },
     debugReason,
@@ -511,6 +531,8 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
       stage3Candidates: 0,
       stage4Candidates: 0,
       isDownMarket: false,
+      tradeabilityThreshold: HK_CONFIG.tradeabilityThreshold,
+      qualifiedCandidates: 0,
       marketClosedNotice: "港股今日休市（週末），請於交易日（週一至五 09:30-16:00）再嘗試掃描。",
     };
     cachedHKScanResult = { result: closedResult, timestamp: Date.now() };
@@ -530,6 +552,8 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
       stage3Candidates: 0,
       stage4Candidates: 0,
       isDownMarket: false,
+      tradeabilityThreshold: HK_CONFIG.tradeabilityThreshold,
+      qualifiedCandidates: 0,
       marketClosedNotice: '港股正規交易時段以外不產生可交易短炒訊號；請於 09:30–12:00 或 13:00–16:00 再掃描。',
     };
   }
@@ -677,14 +701,18 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     }
   }
 
-  // 跌市優先逆市抗跌股，再按預期利潤/信心排序
+  // 只由已通過 Tradeability Score 的候選中最多選 5 隻；少於 5 隻或 0 隻均為正常結果。
   const finalRecommendations = recommendations
+    .filter((recommendation) => recommendation.tradeabilityScore >= HK_CONFIG.tradeabilityThreshold)
     .sort((a, b) => {
       if (isDownMarket) {
         if (a.isCounterTrend && !b.isCounterTrend) return -1;
         if (!a.isCounterTrend && b.isCounterTrend) return 1;
       }
-      return b.riskRewardRatio - a.riskRewardRatio || b.confidence - a.confidence || b.expectedProfitHKD - a.expectedProfitHKD;
+      return b.tradeabilityScore - a.tradeabilityScore
+        || b.riskRewardRatio - a.riskRewardRatio
+        || b.confidence - a.confidence
+        || b.expectedProfitHKD - a.expectedProfitHKD;
     })
     .slice(0, HK_CONFIG.positionsCount);
 
@@ -706,6 +734,8 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     stage3Candidates: stage3Count,
     stage4Candidates: stage4Count,
     isDownMarket,
+    tradeabilityThreshold: HK_CONFIG.tradeabilityThreshold,
+    qualifiedCandidates: recommendations.filter((recommendation) => recommendation.tradeabilityScore >= HK_CONFIG.tradeabilityThreshold).length,
   };
 
   cachedHKScanResult = { result: finalResult, timestamp: Date.now() };
