@@ -113,3 +113,63 @@ export function buildLongIntradayRiskPlan(params: {
     reason: null,
   };
 }
+
+export interface TradeabilityScoreInput {
+  volumeRatio: number;
+  relativeStrength: number;
+  atrPercent: number;
+  riskRewardRatio: number;
+  isCounterTrend?: boolean;
+}
+
+export interface TradeabilityScoreResult {
+  score: number;
+  passed: boolean;
+  threshold: number;
+  components: {
+    liquidity: number;
+    relativeStrength: number;
+    volatility: number;
+    rewardRisk: number;
+    context: number;
+  };
+  reason: string;
+}
+
+/**
+ * 評估「今日是否值得交易」，不是預測股價方向，也不是勝率。
+ * Score 只使用掃描當刻已有的成交活躍度、相對強度、可交易波幅及風險回報資料。
+ */
+export function calculateTradeabilityScore(
+  input: TradeabilityScoreInput,
+  threshold = 60,
+): TradeabilityScoreResult {
+  const volumeRatio = Number.isFinite(input.volumeRatio) ? input.volumeRatio : 0;
+  const relativeStrength = Number.isFinite(input.relativeStrength) ? input.relativeStrength : -Infinity;
+  const atrPercent = Number.isFinite(input.atrPercent) ? input.atrPercent : 0;
+  const riskRewardRatio = Number.isFinite(input.riskRewardRatio) ? input.riskRewardRatio : 0;
+
+  const liquidity = volumeRatio >= 2 ? 30 : volumeRatio >= 1.5 ? 24 : volumeRatio >= 1.2 ? 16 : volumeRatio >= 1 ? 8 : 0;
+  const relativeStrengthScore = relativeStrength >= 0.02 ? 25 : relativeStrength >= 0.01 ? 18 : relativeStrength > 0 ? 10 : 0;
+  const volatility = atrPercent >= 1 && atrPercent <= 4.5 ? 20 : atrPercent >= 0.75 && atrPercent <= 5 ? 12 : 0;
+  const rewardRisk = riskRewardRatio >= 3 ? 20 : riskRewardRatio >= 2 ? 15 : riskRewardRatio >= 1.5 ? 10 : 0;
+  const context = input.isCounterTrend ? 5 : 0;
+  const score = liquidity + relativeStrengthScore + volatility + rewardRisk + context;
+  const passed = score >= threshold;
+
+  const reasons = [
+    `成交活躍度 ${volumeRatio.toFixed(2)}x=${liquidity}/30`,
+    `相對強度 ${(relativeStrength * 100).toFixed(2)}%=${relativeStrengthScore}/25`,
+    `ATR ${atrPercent.toFixed(2)}%=${volatility}/20`,
+    `回報風險 ${riskRewardRatio.toFixed(2)}R=${rewardRisk}/20`,
+  ];
+  if (input.isCounterTrend) reasons.push(`逆市相對強勢=${context}/5`);
+
+  return {
+    score,
+    passed,
+    threshold,
+    components: { liquidity, relativeStrength: relativeStrengthScore, volatility, rewardRisk, context },
+    reason: `${passed ? '通過' : '未通過'} Tradeability Score ${score}/${threshold}（${reasons.join('；')}）`,
+  };
+}
