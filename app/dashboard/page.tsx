@@ -167,7 +167,7 @@ export default function DashboardPage() {
   const [signals, setSignals] = useState<SignalWithStages[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [scanInfo, setScanInfo] = useState<{ usedSoftener: boolean; nearMissCount: number } | null>(null);
+  const [scanInfo, setScanInfo] = useState<{ usedSoftener: boolean; nearMissCount: number; tradeabilityThreshold?: number; qualifiedCandidates?: number } | null>(null);
   const [marketClosedNotice, setMarketClosedNotice] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'active' | 'closed'>('active');
   const [market, setMarket] = useState<Market>('US');
@@ -215,7 +215,7 @@ export default function DashboardPage() {
       if (!response.ok) throw new Error(data.error || 'Scan failed');
       if (data.success && data.signals) {
         setSignals(data.signals);
-        setScanInfo({ usedSoftener: data.usedSoftener || false, nearMissCount: data.nearMissCount || 0 });
+        setScanInfo({ usedSoftener: data.usedSoftener || false, nearMissCount: data.nearMissCount || 0, tradeabilityThreshold: data.tradeabilityThreshold, qualifiedCandidates: data.qualifiedCandidates });
         if (data.marketClosedNotice) setMarketClosedNotice(data.marketClosedNotice);
       }
     } catch (err) {
@@ -437,6 +437,12 @@ export default function DashboardPage() {
               </button>
             </div>
 
+            {scanInfo?.tradeabilityThreshold != null && (
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 mb-6 text-slate-300 text-xs">
+                今日 Tradeability Score 門檻：<span className="text-blue-300 font-bold">{scanInfo.tradeabilityThreshold}</span>；合格候選：<span className="text-blue-300 font-bold">{scanInfo.qualifiedCandidates ?? 0}</span> 隻。系統最多顯示 5 隻，未達門檻時可以少於 5 隻或零隻。
+              </div>
+            )}
+
             {/* Signals Grid */}
             {displaySignals.length === 0 ? (
               <div className="text-center py-16">
@@ -496,11 +502,11 @@ export default function DashboardPage() {
                           )}
                           <div className="px-5 pb-4">
                             <div className="flex items-center justify-between mb-1.5">
-                              <span className="text-slate-400 text-xs">策略分數（非勝率）</span>
-                              <span className="text-amber-400 text-xs font-bold">{signal.confidence}%</span>
+                              <span className="text-slate-400 text-xs">可交易分數（非勝率）</span>
+                              <span className="text-amber-400 text-xs font-bold">{signal.tradeabilityScore ?? signal.confidence}</span>
                             </div>
                             <div className="h-1.5 bg-white/10 rounded-full">
-                              <div className="h-1.5 bg-gradient-to-r from-amber-400 to-amber-300 rounded-full" style={{ width: `${signal.confidence}%` }} />
+                              <div className="h-1.5 bg-gradient-to-r from-amber-400 to-amber-300 rounded-full" style={{ width: `${signal.tradeabilityScore ?? 0}%` }} />
                             </div>
                           </div>
                           {signal.analysis && <div className="px-5 pb-2"><p className="text-slate-400 text-xs leading-relaxed line-clamp-3">{signal.analysis}</p></div>}
