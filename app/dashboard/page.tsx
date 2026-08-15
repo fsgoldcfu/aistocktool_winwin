@@ -38,13 +38,10 @@ interface SignalWithStages extends StockSignal {
   isNearMiss?: boolean;
   capitalAllocatedHKD?: number;
   expectedProfitHKD?: number;
+  estimatedCostsHKD?: number;
+  estimatedNetProfitHKD?: number;
+  minimumNetProfitHKD?: number;
   isCounterTrend?: boolean;
-  tradeabilityScore?: number;
-  tradeabilityReason?: string;
-  riskRewardRatio?: number;
-  maxHoldingMinutes?: number;
-  entryRule?: string;
-  invalidation?: string;
 }
 
 // ==================== 中短線 Recommendation ====================
@@ -103,61 +100,58 @@ const TRIGGER_COLORS: Record<string, { border: string; badge: string; text: stri
 };
 
 // ==================== 指數 / 槓桿ETF ====================
-interface SignalBacktestStats {
-  label: string;
-  occurrences: number;
-  hitRate: number | null;
-  avgMovePct: number | null;
-  medianMovePct: number | null;
-  avgDaysToHit: number | null;
-}
-
 interface IndexResult {
   symbol: string;
   name: string;
   direction: 'long' | 'short';
-  priceIsLive?: boolean;
   latestClose: number;
   latestDate: string;
+  signalClose: number;
+  analysisAsOf: string;
   trend: 'strong' | 'neutral' | 'weak';
   supportLevels: { avg: number; touches: number }[];
   resistanceLevels: { avg: number; touches: number }[];
-  recentReference: {
-    low: { price: number; date: string };
-    high: { price: number; date: string };
+  data: {
+    priceSource: 'twelve_data_price' | 'prior_close';
+    priceTimestamp: string;
+    lastCompletedDailyBar: string;
+    signalUsesCompletedDailyBar: true;
   };
   indicators: {
-    sma20: number;
-    sma50: number;
-    sma200: number;
-    atr14: number;
-    avgVolume20: number;
+    sma20: number | null;
+    sma50: number | null;
+    sma200: number | null;
+    atr14: number | null;
+    avgVolume20: number | null;
     latestVolume: number;
     volumeSpikeRatio: number | null;
     rsi14: number | null;
-    bollingerUpper: number | null;
-    bollingerLower: number | null;
-    bollingerPosition: 'above_upper' | 'below_lower' | 'inside' | null;
   };
-  historicalStats: {
-    oversoldBounce: SignalBacktestStats;
-    overboughtPullback: SignalBacktestStats;
-    bollingerLowerBounce: SignalBacktestStats;
-    bollingerUpperPullback: SignalBacktestStats;
+  strategyBacktest: {
+    inSample: { trades: number; winRate: number | null; avgR: number | null; maxDrawdownPct: number | null };
+    outOfSample: { trades: number; winRate: number | null; avgR: number | null; maxDrawdownPct: number | null };
+    validationNote: string;
   };
   recommendation: {
+    status: 'TRADEABLE' | 'WATCH' | 'NO_TRADE';
     action: string;
-    nextBuyPrice: number;
-    nextSellPrice: number;
+    nextBuyPrice: number | null;
+    nextSellPrice: number | null;
     basis: string;
+    reasons: string[];
+    tradePlan: {
+      entry: number;
+      initialStop: number;
+      target1: number;
+      target2: number;
+      riskPerShare: number;
+      rewardRiskToT1: number;
+      maxHoldingDays: number;
+      entryRule: string;
+      invalidation: string;
+    } | null;
   };
 }
-
-const BOLLINGER_POSITION_LABELS: Record<string, { label: string; color: string }> = {
-  above_upper: { label: '突破上軌', color: 'text-red-400' },
-  below_lower: { label: '跌穿下軌', color: 'text-emerald-400' },
-  inside: { label: '通道內', color: 'text-slate-400' },
-};
 
 const TREND_LABELS: Record<string, { label: string; color: string }> = {
   strong: { label: '強勢', color: 'text-emerald-400' },
@@ -466,7 +460,7 @@ export default function DashboardPage() {
                   const upside = (((signal.target_price - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
                   const downside = (((signal.stop_loss - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
                   const statusInfo = STATUS_LABELS[signal.status];
-                  const hasCapitalInfo = typeof signal.capitalAllocatedHKD === 'number' && typeof signal.expectedProfitHKD === 'number';
+                  const hasCapitalInfo = typeof signal.capitalAllocatedHKD === 'number' && typeof signal.estimatedNetProfitHKD === 'number';
 
                   return (
                     <div key={signal.id} className={`bg-[#0d1224] border rounded-2xl overflow-hidden transition-all ${signal.isCounterTrend ? 'border-cyan-400/40' : signal.isNearMiss ? 'border-amber-500/30' : signal.isFallback ? 'border-blue-500/30' : 'border-white/10 hover:border-white/20'} ${isLocked ? 'opacity-60' : ''}`}>
@@ -500,9 +494,10 @@ export default function DashboardPage() {
                           {hasCapitalInfo && (
                             <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                               <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">配置參考</div><div className="text-white font-bold text-sm">HK${signal.capitalAllocatedHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
-                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">目標毛利參考</div><div className="text-emerald-400 font-bold text-sm">HK${signal.expectedProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+                              <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">結構目標成本後淨盈利</div><div className="text-emerald-400 font-bold text-sm">HK${signal.estimatedNetProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
                             </div>
                           )}
+                          {hasCapitalInfo && <p className="px-5 pb-3 text-[10px] leading-relaxed text-slate-500">已扣估計買入及賣出成本 HK${(signal.estimatedCostsHKD ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}；只在成本後目標至少 HK${(signal.minimumNetProfitHKD ?? 1000).toLocaleString()} 時推介。目標價並非保證成交。</p>}
                           {typeof signal.riskRewardRatio === 'number' && (
                             <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                               <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">回報／風險</div><div className="text-amber-400 font-bold text-sm">{signal.riskRewardRatio.toFixed(2)}R</div></div>
@@ -679,10 +674,10 @@ export default function DashboardPage() {
             <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
               <Activity className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
               <div>
-                <p className="text-amber-400 font-medium">TQQQ 技術分析掃描</p>
+                <p className="text-amber-400 font-medium">指數 / 槓桿ETF 掃描</p>
                 <p className="text-slate-400 text-sm">
-                  分析TQQQ過去10年daily數據：SMA20/50/200、ATR、RSI、布林通道、支持/阻力位，
-                  並用歷史回測統計超賣/超買訊號嘅命中率。建議價僅供參考，槓桿ETF長線持有有波動耗損風險。
+                  以 TQQQ 已完成日線的均線、ATR、RSI、布林通道和確認支持／阻力作風險計劃分析。
+                  系統只會在趨勢、支持、反轉確認和風險回報同時成立時顯示交易計劃；否則顯示觀察或不交易。
                 </p>
               </div>
             </div>
@@ -722,6 +717,18 @@ export default function DashboardPage() {
                   const resistance = r.resistanceLevels?.[0]?.avg;
                   const buyPrice = r.recommendation?.nextBuyPrice;
                   const sellPrice = r.recommendation?.nextSellPrice;
+                  const plan = r.recommendation?.tradePlan;
+                  const recommendationStatus = r.recommendation?.status || 'NO_TRADE';
+                  const statusStyle = recommendationStatus === 'TRADEABLE'
+                    ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                    : recommendationStatus === 'WATCH'
+                      ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+                      : 'text-slate-400 bg-slate-500/10 border-slate-500/20';
+                  const statusLabel = recommendationStatus === 'TRADEABLE'
+                    ? '可建立計劃'
+                    : recommendationStatus === 'WATCH'
+                      ? '等待確認'
+                      : '不交易';
 
                   return (
                     <div key={r.symbol} className={`bg-[#0d1224] border rounded-2xl overflow-hidden ${isLong ? 'border-emerald-400/30' : 'border-red-400/30'}`}>
@@ -735,30 +742,40 @@ export default function DashboardPage() {
                             <div className="text-slate-500 text-xs">{r.name}</div>
                           </div>
                         </div>
-                        <span className={`text-xs font-medium ${trendInfo.color}`}>{trendInfo.label}</span>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className={`text-xs font-medium ${trendInfo.color}`}>{trendInfo.label}</span>
+                            <span className={`border text-[10px] font-bold px-2 py-0.5 rounded-full ${statusStyle}`}>{statusLabel}</span>
+                          </div>
                       </div>
 
                       <div className="px-5 py-4 grid grid-cols-3 gap-3">
                         <div>
-                          <div className="text-slate-400 text-xs mb-1 flex items-center gap-1.5">
-                            現價
-                            <span className={r.priceIsLive ? 'text-emerald-400' : 'text-amber-400'}>
-                              {r.priceIsLive ? '● 即市' : '● 收市價'}
-                            </span>
-                          </div>
+                          <div className="text-slate-400 text-xs mb-1">現價</div>
                           <div className="text-white font-bold text-lg">${r.latestClose.toFixed(2)}</div>
+                          <div className="text-slate-500 text-[10px] mt-1">{r.data?.priceSource === 'twelve_data_price' ? 'price endpoint' : `收市 ${r.data?.lastCompletedDailyBar || r.latestDate}`}</div>
                         </div>
                         <div>
-                          <div className="text-slate-400 text-xs mb-1">{isLong ? '建議買入' : '建議做空'}</div>
-                          <div className="text-white font-bold text-lg">${buyPrice != null ? (isLong ? buyPrice : sellPrice)?.toFixed(2) : '—'}</div>
+                          <div className="text-slate-400 text-xs mb-1">觸發入場</div>
+                          <div className="text-white font-bold text-lg">{buyPrice != null ? buyPrice.toFixed(2) : '—'}</div>
                         </div>
                         <div>
-                          <div className="text-slate-400 text-xs mb-1">{isLong ? '建議賣出' : '建議回補'}</div>
+                          <div className="text-slate-400 text-xs mb-1">目標一</div>
                           <div className={`font-bold text-lg ${isLong ? 'text-emerald-400' : 'text-red-400'}`}>
-                            ${sellPrice != null ? (isLong ? sellPrice : buyPrice)?.toFixed(2) : '—'}
+                            {sellPrice != null ? sellPrice.toFixed(2) : '—'}
                           </div>
                         </div>
                       </div>
+
+                      {plan ? (
+                        <div className="px-5 pb-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">止蝕／失效</div><div className="text-red-400 font-bold text-sm">${plan.initialStop.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">每股風險</div><div className="text-slate-200 font-bold text-sm">${plan.riskPerShare.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">目標二</div><div className="text-emerald-300 font-bold text-sm">${plan.target2.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">回報／風險</div><div className="text-amber-400 font-bold text-sm">{plan.rewardRiskToT1.toFixed(2)}R</div></div>
+                        </div>
+                      ) : (
+                        <div className="px-5 pb-3 text-xs text-slate-400">{r.recommendation?.reasons?.[0] || '目前未符合建立交易計劃的條件。'}</div>
+                      )}
 
                       <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                         <div className="bg-white/5 rounded-xl px-3 py-2">
@@ -771,66 +788,21 @@ export default function DashboardPage() {
                         </div>
                       </div>
 
-                      {r.recentReference && (
-                        <div className="px-5 pb-3 text-xs text-slate-500 flex items-center gap-1">
-                          <span className="text-slate-600">近10日(未確認)：</span>
-                          低 {r.recentReference.low.price.toFixed(2)}({r.recentReference.low.date.slice(5)}) ·
-                          高 {r.recentReference.high.price.toFixed(2)}({r.recentReference.high.date.slice(5)})
-                        </div>
-                      )}
+                      <div className="px-5 pb-3 text-xs text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
+                        {r.indicators?.volumeSpikeRatio != null && <span>量比 {r.indicators.volumeSpikeRatio.toFixed(2)}x</span>}
+                        {r.indicators?.atr14 != null && <span>ATR14 {r.indicators.atr14.toFixed(2)}</span>}
+                        {r.indicators?.rsi14 != null && <span>RSI14 {r.indicators.rsi14.toFixed(1)}</span>}
+                        {plan && <span>最長持有 {plan.maxHoldingDays} 日</span>}
+                      </div>
 
-                      {r.indicators?.volumeSpikeRatio != null && (
-                        <div className="px-5 pb-3 text-xs text-slate-500 flex items-center gap-3">
-                          <span>量比 {r.indicators.volumeSpikeRatio.toFixed(2)}x</span>
-                          <span>ATR14 {r.indicators.atr14?.toFixed(2)}</span>
-                          {r.indicators.rsi14 != null && (
-                            <span className={r.indicators.rsi14 < 30 ? 'text-emerald-400 font-bold' : r.indicators.rsi14 > 70 ? 'text-red-400 font-bold' : ''}>
-                              RSI {r.indicators.rsi14.toFixed(0)}
-                            </span>
-                          )}
-                          {r.indicators.bollingerPosition && (
-                            <span className={BOLLINGER_POSITION_LABELS[r.indicators.bollingerPosition].color}>
-                              布林{BOLLINGER_POSITION_LABELS[r.indicators.bollingerPosition].label}
-                            </span>
-                          )}
-                        </div>
-                      )}
-
-                      {/* ===== 歷史回測統計：獨立區塊，唔再塞晒喺basis一句字入面 ===== */}
-                      {r.historicalStats && (
-                        <div className="px-5 pb-4">
-                          <div className="text-slate-500 text-xs uppercase tracking-wide mb-2">歷史訊號回測（10年樣本）</div>
-                          <div className="grid grid-cols-2 gap-2">
-                            {([
-                              { stat: r.historicalStats.oversoldBounce, tone: 'up' as const },
-                              { stat: r.historicalStats.bollingerLowerBounce, tone: 'up' as const },
-                              { stat: r.historicalStats.overboughtPullback, tone: 'down' as const },
-                              { stat: r.historicalStats.bollingerUpperPullback, tone: 'down' as const },
-                            ]).map(({ stat, tone }, i) =>
-                              stat && stat.occurrences > 0 ? (
-                                <div
-                                  key={i}
-                                  className={`bg-white/5 rounded-xl px-3 py-2 border ${tone === 'up' ? 'border-emerald-500/20' : 'border-red-500/20'}`}
-                                >
-                                  <div className="text-slate-400 text-xs mb-1 leading-tight">{stat.label}</div>
-                                  <div className="flex items-baseline gap-1.5">
-                                    <span className={`font-bold text-lg ${tone === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
-                                      {stat.hitRate}%
-                                    </span>
-                                    <span className="text-slate-500 text-xs">命中率</span>
-                                  </div>
-                                  <div className="text-slate-500 text-xs mt-1">
-                                    樣本{stat.occurrences}次 · 平均{stat.avgMovePct}% · 平均{stat.avgDaysToHit}日
-                                  </div>
-                                </div>
-                              ) : (
-                                <div key={i} className="bg-white/5 rounded-xl px-3 py-2 border border-white/5">
-                                  <div className="text-slate-500 text-xs leading-tight">{stat?.label ?? '—'}</div>
-                                  <div className="text-slate-600 text-xs mt-1">歷史樣本不足</div>
-                                </div>
-                              )
-                            )}
+                      {r.strategyBacktest && (
+                        <div className="mx-5 mb-3 rounded-xl border border-white/5 bg-white/[0.02] p-3">
+                          <div className="text-slate-400 text-[10px] mb-2">固定規則交易級回測（成本後）</div>
+                          <div className="grid grid-cols-2 gap-2 text-[11px]">
+                            <div><span className="text-slate-500">研究樣本</span><span className="ml-2 text-slate-300">{r.strategyBacktest.inSample.trades}單 · {r.strategyBacktest.inSample.avgR ?? '—'}R</span></div>
+                            <div><span className="text-slate-500">OOS</span><span className="ml-2 text-slate-300">{r.strategyBacktest.outOfSample.trades}單 · {r.strategyBacktest.outOfSample.avgR ?? '—'}R</span></div>
                           </div>
+                          <p className="text-slate-600 text-[10px] mt-2 leading-relaxed">{r.strategyBacktest.validationNote}</p>
                         </div>
                       )}
 
