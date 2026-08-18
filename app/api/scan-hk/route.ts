@@ -9,7 +9,8 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const thresholdSoftenerActive = body?.thresholdSoftenerActive === true;
-    const result = await runHKScannerV1(thresholdSoftenerActive);
+    const capitalSettings = body?.capitalSettings;
+    const result = await runHKScannerV1(thresholdSoftenerActive, capitalSettings);
     const generatedAt = new Date().toISOString();
 
     const signals = result.recommendations.map((rec) => ({
@@ -43,6 +44,10 @@ export async function POST(req: NextRequest) {
       tradeabilityReason: rec.tradeabilityReason,
       resistanceLevel: rec.resistanceLevel,
       resistanceSource: rec.resistanceSource,
+      catalystStatus: rec.catalystStatus,
+      catalystSummary: rec.catalystSummary,
+      catalystEvidence: rec.catalystEvidence,
+      recommendationReasons: rec.recommendationReasons,
     }));
 
     return NextResponse.json(
@@ -56,6 +61,7 @@ export async function POST(req: NextRequest) {
         marketClosedNotice: result.marketClosedNotice || null,
         tradeabilityThreshold: result.tradeabilityThreshold,
         qualifiedCandidates: result.qualifiedCandidates,
+        capitalPlan: result.capitalPlan || null,
         generatedAt,
       },
       { headers: { 'Cache-Control': 'no-store, max-age=0' } }

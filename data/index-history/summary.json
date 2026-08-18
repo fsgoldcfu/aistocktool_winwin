@@ -1,0 +1,594 @@
+{
+  "reference_date_utc": "2026-08-18",
+  "source": "Yahoo Finance chart endpoint; adjusted close; 2016-08-18 to 2026-08-18",
+  "symbols": {
+    "TQQQ": {
+      "symbol": "TQQQ",
+      "rows": 2511,
+      "start_date": "2016-08-18",
+      "end_date": "2026-08-14",
+      "start_adjclose": 2.463403,
+      "end_adjclose": 76.790001,
+      "total_return_pct": 3017.23,
+      "annualized_return_pct": 41.23,
+      "annualized_volatility_pct": 66.72,
+      "max_drawdown_pct": -81.66,
+      "max_drawdown_peak_date": "2022-12-28",
+      "all_time_high_adjclose": 87.019646,
+      "all_time_high_date": "2026-06-02",
+      "all_time_low_adjclose": 2.225859,
+      "all_time_low_date": "2016-11-04",
+      "positive_1y_rate_pct": 79.02,
+      "median_1y_return_pct": 60.64,
+      "episodes_10pct": [
+        {
+          "peak_date": "2016-11-02",
+          "trough_date": "2016-11-04",
+          "recovery_date": "2016-11-21",
+          "drawdown_pct": -14.31,
+          "days_to_trough": 2,
+          "days_to_recovery": 19
+        },
+        {
+          "peak_date": "2016-12-01",
+          "trough_date": "2016-12-01",
+          "recovery_date": "2016-12-07",
+          "drawdown_pct": -10.61,
+          "days_to_trough": 0,
+          "days_to_recovery": 6
+        },
+        {
+          "peak_date": "2017-06-16",
+          "trough_date": "2017-06-16",
+          "recovery_date": "2017-06-23",
+          "drawdown_pct": -10.36,
+          "days_to_trough": 0,
+          "days_to_recovery": 7
+        },
+        {
+          "peak_date": "2017-06-27",
+          "trough_date": "2017-07-03",
+          "recovery_date": "2017-07-14",
+          "drawdown_pct": -14.66,
+          "days_to_trough": 6,
+          "days_to_recovery": 17
+        },
+        {
+          "peak_date": "2018-02-02",
+          "trough_date": "2018-02-08",
+          "recovery_date": "2018-02-26",
+          "drawdown_pct": -28.56,
+          "days_to_trough": 6,
+          "days_to_recovery": 24
+        },
+        {
+          "peak_date": "2018-03-01",
+          "trough_date": "2018-03-01",
+          "recovery_date": "2018-03-08",
+          "drawdown_pct": -13.06,
+          "days_to_trough": 0,
+          "days_to_recovery": 7
+        },
+        {
+          "peak_date": "2018-03-19",
+          "trough_date": "2018-04-02",
+          "recovery_date": "2018-06-04",
+          "drawdown_pct": -29.68,
+          "days_to_trough": 14,
+          "days_to_recovery": 77
+        },
+        {
+          "peak_date": "2018-06-27",
+          "trough_date": "2018-06-27",
+          "recovery_date": "2018-07-06",
+          "drawdown_pct": -12.43,
+          "days_to_trough": 0,
+          "days_to_recovery": 9
+        },
+        {
+          "peak_date": "2018-07-30",
+          "trough_date": "2018-07-30",
+          "recovery_date": "2018-08-03",
+          "drawdown_pct": -12.3,
+          "days_to_trough": 0,
+          "days_to_recovery": 4
+        },
+        {
+          "peak_date": "2018-10-05",
+          "trough_date": "2018-12-24",
+          "recovery_date": "2019-07-15",
+          "drawdown_pct": -58.08,
+          "days_to_trough": 80,
+          "days_to_recovery": 283
+        },
+        {
+          "peak_date": "2019-08-01",
+          "trough_date": "2019-08-05",
+          "recovery_date": "2019-10-28",
+          "drawdown_pct": -23.68,
+          "days_to_trough": 4,
+          "days_to_recovery": 88
+        },
+        {
+          "peak_date": "2020-02-24",
+          "trough_date": "2020-03-20",
+          "recovery_date": "2020-07-08",
+          "drawdown_pct": -69.92,
+          "days_to_trough": 25,
+          "days_to_recovery": 135
+        },
+        {
+          "peak_date": "2020-07-24",
+          "trough_date": "2020-07-24",
+          "recovery_date": "2020-07-31",
+          "drawdown_pct": -12.42,
+          "days_to_trough": 0,
+          "days_to_recovery": 7
+        },
+        {
+          "peak_date": "2020-09-03",
+          "trough_date": "2020-09-23",
+          "recovery_date": "2020-12-04",
+          "drawdown_pct": -35.38,
+          "days_to_trough": 20,
+          "days_to_recovery": 92
+        },
+        {
+          "peak_date": "2021-01-29",
+          "trough_date": "2021-01-29",
+          "recovery_date": "2021-02-02",
+          "drawdown_pct": -12.52,
+          "days_to_trough": 0,
+          "days_to_recovery": 4
+        },
+        {
+          "peak_date": "2021-02-22",
+          "trough_date": "2021-03-08",
+          "recovery_date": "2021-04-08",
+          "drawdown_pct": -30.43,
+          "days_to_trough": 14,
+          "days_to_recovery": 45
+        },
+        {
+          "peak_date": "2021-05-04",
+          "trough_date": "2021-05-12",
+          "recovery_date": "2021-06-10",
+          "drawdown_pct": -21.07,
+          "days_to_trough": 8,
+          "days_to_recovery": 37
+        },
+        {
+          "peak_date": "2021-09-20",
+          "trough_date": "2021-10-04",
+          "recovery_date": "2021-10-21",
+          "drawdown_pct": -21.72,
+          "days_to_trough": 14,
+          "days_to_recovery": 31
+        },
+        {
+          "peak_date": "2021-12-01",
+          "trough_date": "2021-12-03",
+          "recovery_date": "2021-12-08",
+          "drawdown_pct": -15.28,
+          "days_to_trough": 2,
+          "days_to_recovery": 7
+        },
+        {
+          "peak_date": "2021-12-14",
+          "trough_date": "2021-12-20",
+          "recovery_date": "2021-12-27",
+          "drawdown_pct": -17.42,
+          "days_to_trough": 6,
+          "days_to_recovery": 13
+        },
+        {
+          "peak_date": "2022-01-05",
+          "trough_date": "2022-12-28",
+          "recovery_date": "2024-07-08",
+          "drawdown_pct": -81.66,
+          "days_to_trough": 357,
+          "days_to_recovery": 915
+        },
+        {
+          "peak_date": "2024-07-17",
+          "trough_date": "2024-08-07",
+          "recovery_date": "2024-11-07",
+          "drawdown_pct": -38.15,
+          "days_to_trough": 21,
+          "days_to_recovery": 113
+        },
+        {
+          "peak_date": "2024-11-15",
+          "trough_date": "2024-11-15",
+          "recovery_date": "2024-12-02",
+          "drawdown_pct": -13.36,
+          "days_to_trough": 0,
+          "days_to_recovery": 17
+        },
+        {
+          "peak_date": "2024-12-18",
+          "trough_date": "2024-12-19",
+          "recovery_date": "2024-12-24",
+          "drawdown_pct": -13.25,
+          "days_to_trough": 1,
+          "days_to_recovery": 6
+        },
+        {
+          "peak_date": "2024-12-30",
+          "trough_date": "2025-01-14",
+          "recovery_date": "2025-01-23",
+          "drawdown_pct": -18.52,
+          "days_to_trough": 15,
+          "days_to_recovery": 24
+        },
+        {
+          "peak_date": "2025-01-27",
+          "trough_date": "2025-01-27",
+          "recovery_date": "2025-02-13",
+          "drawdown_pct": -14.89,
+          "days_to_trough": 0,
+          "days_to_recovery": 17
+        },
+        {
+          "peak_date": "2025-02-24",
+          "trough_date": "2025-04-08",
+          "recovery_date": "2025-07-21",
+          "drawdown_pct": -58.04,
+          "days_to_trough": 43,
+          "days_to_recovery": 147
+        },
+        {
+          "peak_date": "2025-08-01",
+          "trough_date": "2025-08-01",
+          "recovery_date": "2025-08-06",
+          "drawdown_pct": -10.31,
+          "days_to_trough": 0,
+          "days_to_recovery": 5
+        },
+        {
+          "peak_date": "2025-10-10",
+          "trough_date": "2025-10-10",
+          "recovery_date": "2025-10-17",
+          "drawdown_pct": -10.85,
+          "days_to_trough": 0,
+          "days_to_recovery": 7
+        },
+        {
+          "peak_date": "2025-11-06",
+          "trough_date": "2026-03-30",
+          "recovery_date": "2026-04-17",
+          "drawdown_pct": -36.97,
+          "days_to_trough": 144,
+          "days_to_recovery": 162
+        },
+        {
+          "peak_date": "2026-06-05",
+          "trough_date": "2026-06-10",
+          "recovery_date": "2026-06-15",
+          "drawdown_pct": -20.58,
+          "days_to_trough": 5,
+          "days_to_recovery": 10
+        },
+        {
+          "peak_date": "2026-06-17",
+          "trough_date": "2026-06-17",
+          "recovery_date": "2026-06-18",
+          "drawdown_pct": -11.1,
+          "days_to_trough": 0,
+          "days_to_recovery": 1
+        },
+        {
+          "peak_date": "2026-06-23",
+          "trough_date": "2026-07-29",
+          "recovery_date": null,
+          "drawdown_pct": -33.64,
+          "days_to_trough": 36,
+          "days_to_recovery": null
+        }
+      ]
+    },
+    "VOO": {
+      "symbol": "VOO",
+      "rows": 2511,
+      "start_date": "2016-08-18",
+      "end_date": "2026-08-14",
+      "start_adjclose": 170.231628,
+      "end_adjclose": 713.609985,
+      "total_return_pct": 319.2,
+      "annualized_return_pct": 15.47,
+      "annualized_volatility_pct": 18.04,
+      "max_drawdown_pct": -33.99,
+      "max_drawdown_peak_date": "2020-03-23",
+      "all_time_high_adjclose": 714.950012,
+      "all_time_high_date": "2026-08-13",
+      "all_time_low_adjclose": 163.039627,
+      "all_time_low_date": "2016-11-04",
+      "positive_1y_rate_pct": 86.01,
+      "median_1y_return_pct": 16.72,
+      "episodes_10pct": [
+        {
+          "peak_date": "2018-02-08",
+          "trough_date": "2018-02-08",
+          "recovery_date": "2018-02-15",
+          "drawdown_pct": -10.09,
+          "days_to_trough": 0,
+          "days_to_recovery": 7
+        },
+        {
+          "peak_date": "2018-12-14",
+          "trough_date": "2018-12-24",
+          "recovery_date": "2019-02-15",
+          "drawdown_pct": -19.48,
+          "days_to_trough": 10,
+          "days_to_recovery": 63
+        },
+        {
+          "peak_date": "2020-02-27",
+          "trough_date": "2020-03-23",
+          "recovery_date": "2020-06-08",
+          "drawdown_pct": -33.99,
+          "days_to_trough": 25,
+          "days_to_recovery": 102
+        },
+        {
+          "peak_date": "2020-06-11",
+          "trough_date": "2020-06-11",
+          "recovery_date": "2020-07-14",
+          "drawdown_pct": -10.71,
+          "days_to_trough": 0,
+          "days_to_recovery": 33
+        },
+        {
+          "peak_date": "2022-02-22",
+          "trough_date": "2022-03-08",
+          "recovery_date": "2022-03-25",
+          "drawdown_pct": -12.87,
+          "days_to_trough": 14,
+          "days_to_recovery": 31
+        },
+        {
+          "peak_date": "2022-04-22",
+          "trough_date": "2022-10-12",
+          "recovery_date": "2023-06-30",
+          "drawdown_pct": -24.52,
+          "days_to_trough": 173,
+          "days_to_recovery": 434
+        },
+        {
+          "peak_date": "2023-10-25",
+          "trough_date": "2023-10-27",
+          "recovery_date": "2023-11-14",
+          "drawdown_pct": -11.62,
+          "days_to_trough": 2,
+          "days_to_recovery": 20
+        },
+        {
+          "peak_date": "2025-03-13",
+          "trough_date": "2025-04-08",
+          "recovery_date": "2025-05-12",
+          "drawdown_pct": -18.69,
+          "days_to_trough": 26,
+          "days_to_recovery": 60
+        }
+      ]
+    },
+    "SPY": {
+      "symbol": "SPY",
+      "rows": 2511,
+      "start_date": "2016-08-18",
+      "end_date": "2026-08-14",
+      "start_adjclose": 186.427841,
+      "end_adjclose": 776.340027,
+      "total_return_pct": 316.43,
+      "annualized_return_pct": 15.39,
+      "annualized_volatility_pct": 17.97,
+      "max_drawdown_pct": -33.72,
+      "max_drawdown_peak_date": "2020-03-23",
+      "all_time_high_adjclose": 777.880005,
+      "all_time_high_date": "2026-08-13",
+      "all_time_low_adjclose": 178.542984,
+      "all_time_low_date": "2016-11-04",
+      "positive_1y_rate_pct": 86.01,
+      "median_1y_return_pct": 16.67,
+      "episodes_10pct": [
+        {
+          "peak_date": "2018-02-08",
+          "trough_date": "2018-02-08",
+          "recovery_date": "2018-02-15",
+          "drawdown_pct": -10.1,
+          "days_to_trough": 0,
+          "days_to_recovery": 7
+        },
+        {
+          "peak_date": "2018-12-14",
+          "trough_date": "2018-12-24",
+          "recovery_date": "2019-02-15",
+          "drawdown_pct": -19.35,
+          "days_to_trough": 10,
+          "days_to_recovery": 63
+        },
+        {
+          "peak_date": "2020-02-27",
+          "trough_date": "2020-03-23",
+          "recovery_date": "2020-06-08",
+          "drawdown_pct": -33.72,
+          "days_to_trough": 25,
+          "days_to_recovery": 102
+        },
+        {
+          "peak_date": "2020-06-11",
+          "trough_date": "2020-06-11",
+          "recovery_date": "2020-07-14",
+          "drawdown_pct": -10.63,
+          "days_to_trough": 0,
+          "days_to_recovery": 33
+        },
+        {
+          "peak_date": "2022-02-22",
+          "trough_date": "2022-03-08",
+          "recovery_date": "2022-03-25",
+          "drawdown_pct": -12.87,
+          "days_to_trough": 14,
+          "days_to_recovery": 31
+        },
+        {
+          "peak_date": "2022-04-22",
+          "trough_date": "2022-10-12",
+          "recovery_date": "2023-06-30",
+          "drawdown_pct": -24.5,
+          "days_to_trough": 173,
+          "days_to_recovery": 434
+        },
+        {
+          "peak_date": "2023-10-25",
+          "trough_date": "2023-10-27",
+          "recovery_date": "2023-11-14",
+          "drawdown_pct": -11.67,
+          "days_to_trough": 2,
+          "days_to_recovery": 20
+        },
+        {
+          "peak_date": "2025-03-13",
+          "trough_date": "2025-04-08",
+          "recovery_date": "2025-05-12",
+          "drawdown_pct": -18.76,
+          "days_to_trough": 26,
+          "days_to_recovery": 60
+        }
+      ]
+    },
+    "SSO": {
+      "symbol": "SSO",
+      "rows": 2511,
+      "start_date": "2016-08-18",
+      "end_date": "2026-08-14",
+      "start_adjclose": 8.57116,
+      "end_adjclose": 72.199997,
+      "total_return_pct": 742.36,
+      "annualized_return_pct": 23.85,
+      "annualized_volatility_pct": 35.95,
+      "max_drawdown_pct": -59.34,
+      "max_drawdown_peak_date": "2020-03-23",
+      "all_time_high_adjclose": 72.519997,
+      "all_time_high_date": "2026-08-13",
+      "all_time_low_adjclose": 7.812656,
+      "all_time_low_date": "2016-11-04",
+      "positive_1y_rate_pct": 81.94,
+      "median_1y_return_pct": 25.3,
+      "episodes_10pct": [
+        {
+          "peak_date": "2018-02-05",
+          "trough_date": "2018-04-02",
+          "recovery_date": "2018-07-18",
+          "drawdown_pct": -19.76,
+          "days_to_trough": 56,
+          "days_to_recovery": 163
+        },
+        {
+          "peak_date": "2018-10-11",
+          "trough_date": "2018-12-24",
+          "recovery_date": "2019-04-05",
+          "drawdown_pct": -36.57,
+          "days_to_trough": 74,
+          "days_to_recovery": 176
+        },
+        {
+          "peak_date": "2019-05-28",
+          "trough_date": "2019-06-03",
+          "recovery_date": "2019-06-13",
+          "drawdown_pct": -14.26,
+          "days_to_trough": 6,
+          "days_to_recovery": 16
+        },
+        {
+          "peak_date": "2019-08-05",
+          "trough_date": "2019-08-14",
+          "recovery_date": "2019-09-05",
+          "drawdown_pct": -12.06,
+          "days_to_trough": 9,
+          "days_to_recovery": 31
+        },
+        {
+          "peak_date": "2020-02-25",
+          "trough_date": "2020-03-23",
+          "recovery_date": "2020-08-26",
+          "drawdown_pct": -59.34,
+          "days_to_trough": 27,
+          "days_to_recovery": 183
+        },
+        {
+          "peak_date": "2020-09-08",
+          "trough_date": "2020-09-23",
+          "recovery_date": "2020-10-12",
+          "drawdown_pct": -18.4,
+          "days_to_trough": 15,
+          "days_to_recovery": 34
+        },
+        {
+          "peak_date": "2020-10-26",
+          "trough_date": "2020-10-30",
+          "recovery_date": "2020-11-05",
+          "drawdown_pct": -16.9,
+          "days_to_trough": 4,
+          "days_to_recovery": 10
+        },
+        {
+          "peak_date": "2021-10-04",
+          "trough_date": "2021-10-04",
+          "recovery_date": "2021-10-14",
+          "drawdown_pct": -10.21,
+          "days_to_trough": 0,
+          "days_to_recovery": 10
+        },
+        {
+          "peak_date": "2022-01-19",
+          "trough_date": "2022-10-12",
+          "recovery_date": "2024-02-07",
+          "drawdown_pct": -46.73,
+          "days_to_trough": 266,
+          "days_to_recovery": 749
+        },
+        {
+          "peak_date": "2024-04-19",
+          "trough_date": "2024-04-19",
+          "recovery_date": "2024-05-06",
+          "drawdown_pct": -10.92,
+          "days_to_trough": 0,
+          "days_to_recovery": 17
+        },
+        {
+          "peak_date": "2024-08-02",
+          "trough_date": "2024-08-05",
+          "recovery_date": "2024-08-16",
+          "drawdown_pct": -16.7,
+          "days_to_trough": 3,
+          "days_to_recovery": 14
+        },
+        {
+          "peak_date": "2025-03-04",
+          "trough_date": "2025-04-08",
+          "recovery_date": "2025-06-26",
+          "drawdown_pct": -35.21,
+          "days_to_trough": 35,
+          "days_to_recovery": 114
+        },
+        {
+          "peak_date": "2025-11-20",
+          "trough_date": "2025-11-20",
+          "recovery_date": "2025-11-25",
+          "drawdown_pct": -10.31,
+          "days_to_trough": 0,
+          "days_to_recovery": 5
+        },
+        {
+          "peak_date": "2026-03-13",
+          "trough_date": "2026-03-30",
+          "recovery_date": "2026-04-13",
+          "drawdown_pct": -18.16,
+          "days_to_trough": 17,
+          "days_to_recovery": 31
+        }
+      ]
+    }
+  }
+}

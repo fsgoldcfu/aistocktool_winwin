@@ -9,7 +9,11 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "verify:index-analysis": "npx tsx scripts/verify-index-analysis.ts",
-    "verify:short-term-risk": "npx tsx scripts/verify-short-term-risk.ts"
+    "verify:today-picks": "npx tsx scripts/verify-today-picks.ts",
+    "verify:capital-settings": "npx tsx scripts/verify-capital-settings.ts",
+    "verify:short-term-risk": "npx tsx scripts/verify-short-term-risk.ts",
+    "verify:catalysts": "npx tsx scripts/verify-catalyst-analysis.ts",
+    "verify:trade-journal": "npx tsx scripts/verify-trade-journal.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",

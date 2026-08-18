@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildLongIntradayRiskPlan, calculateTradeabilityScore } from '../lib/shortTermRisk';
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateFutuHkStockNetProfit, evaluateFutuUsStockNetProfit } from '../lib/shortTermRisk';
 
 const qualifyingCandles = [
   { high: 100, low: 96 },
@@ -64,5 +64,49 @@ const rejectedScore = calculateTradeabilityScore({
   riskRewardRatio: 1.2,
 });
 assert.equal(rejectedScore.passed, false, 'weak liquidity and insufficient R must fail closed');
+
+const tqqqSizedAtHk50k = evaluateFutuUsStockNetProfit({
+  entryPrice: 70,
+  targetPrice: 72,
+  shares: 91, // floor(HK$50,000 / 7.8 / US$70)
+  oneWaySlippageBps: 5,
+  fxToHKD: 7.8,
+  minimumNetProfitHKD: 500,
+});
+assert.equal(tqqqSizedAtHk50k.feasible, true, 'TQQQ-sized position must clear HK$500 only after Futu fees and slippage');
+assert.ok(tqqqSizedAtHk50k.costBreakdown.totalEstimatedCosts > 0, 'US model must include explicit Futu fees');
+
+const highPricedMuRejected = evaluateFutuUsStockNetProfit({
+  entryPrice: 900,
+  targetPrice: 908,
+  shares: 7, // floor(HK$50,000 / 7.8 / US$900)
+  oneWaySlippageBps: 5,
+  fxToHKD: 7.8,
+  minimumNetProfitHKD: 500,
+});
+assert.equal(highPricedMuRejected.feasible, false, 'high-priced low-share position must not pass on gross profit alone');
+
+const hk50kPassesAfterFutuFees = evaluateFutuHkStockNetProfit({
+  entryPrice: 50,
+  targetPrice: 52,
+  shares: 1000,
+  oneWaySlippageBps: 5,
+  minimumNetProfitHKD: 500,
+  commissionRate: 0,
+  platformFeePerOrder: 15,
+});
+assert.equal(hk50kPassesAfterFutuFees.feasible, true, 'HK$50,000 HK stock position must include platform, stamp and exchange fees');
+assert.ok(hk50kPassesAfterFutuFees.costBreakdown.totalEstimatedCosts > 140, 'HK model must include known Futu/HKEX costs before slippage');
+
+const hk50kRejectedAfterFutuFees = evaluateFutuHkStockNetProfit({
+  entryPrice: 50,
+  targetPrice: 50.5,
+  shares: 1000,
+  oneWaySlippageBps: 5,
+  minimumNetProfitHKD: 500,
+  commissionRate: 0,
+  platformFeePerOrder: 15,
+});
+assert.equal(hk50kRejectedAfterFutuFees.feasible, false, 'HK gross HK$500 must fail against the HK$500 gate after costs when actual known fees and slippage reduce net profit below target');
 
 console.log('shortTermRisk verification passed');

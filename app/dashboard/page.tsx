@@ -4,6 +4,9 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { supabase, type StockSignal, type Profile } from '@/lib/supabase';
+import { TradeJournalPanel } from '@/components/TradeJournalPanel';
+import { TodayPicksPanel } from '@/components/TodayPicksPanel';
+import { CapitalSettingsPanel, DEFAULT_USER_CAPITAL_SETTINGS, loadUserCapitalSettings, capitalQuery, type UserCapitalSettings } from '@/components/CapitalSettingsPanel';
 import {
   TrendingUp, TrendingDown, LogOut, Crown, Zap, Clock,
   BarChart2, RefreshCw, Lock, ChevronRight, User,
@@ -41,6 +44,13 @@ interface SignalWithStages extends StockSignal {
   estimatedCostsHKD?: number;
   estimatedNetProfitHKD?: number;
   minimumNetProfitHKD?: number;
+  catalystStatus?: 'verified-positive' | 'neutral' | 'event-risk' | 'unavailable';
+  catalystSummary?: string;
+  catalystEvidence?: string[];
+  catalystHeadline?: string;
+  catalystUrl?: string;
+  upcomingEarningsDate?: string;
+  recommendationReasons?: string[];
   isCounterTrend?: boolean;
 }
 
@@ -151,6 +161,8 @@ interface IndexResult {
       invalidation: string;
     } | null;
   };
+  capitalPlan?: { capitalPerPositionHKD: number; dailyCapitalHKD: number };
+  capitalFeasibility?: { feasible: boolean; shares?: number; capitalAllocatedHKD?: number; estimatedNetProfitHKD?: number; estimatedCostsHKD?: number; minimumNetProfitHKD?: number; reason?: string } | null;
 }
 
 const TREND_LABELS: Record<string, { label: string; color: string }> = {
@@ -174,6 +186,7 @@ export default function DashboardPage() {
   const [marketClosedNotice, setMarketClosedNotice] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'active' | 'closed'>('active');
   const [market, setMarket] = useState<Market>('US');
+  const [capitalSettings, setCapitalSettings] = useState<UserCapitalSettings>(DEFAULT_USER_CAPITAL_SETTINGS);
 
   // 中短線 state
   const [midtermRecs, setMidtermRecs] = useState<MidtermRec[]>([]);
@@ -194,6 +207,7 @@ export default function DashboardPage() {
 
   const loadData = async () => {
     setLoading(true);
+    setCapitalSettings(loadUserCapitalSettings());
     setProfile({
       id: 'guest', email: 'guest@local', full_name: '訪客',
       subscription_status: 'active'
@@ -212,7 +226,7 @@ export default function DashboardPage() {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'linkage', riskLevel: 'medium' })
+        body: JSON.stringify({ mode: 'linkage', riskLevel: 'medium', capitalSettings })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Scan failed');
@@ -262,7 +276,7 @@ export default function DashboardPage() {
     setIndexScanning(true);
     setIndexError(null);
     try {
-      const response = await fetch('/api/index-scanner');
+      const response = await fetch(`/api/index-scanner${capitalQuery(capitalSettings)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '掃描失敗');
       setIndexResults(data.results || []);
@@ -341,6 +355,9 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-black text-white mb-1">你好，{profile?.full_name || '會員'} 👋</h1>
           <p className="text-slate-400 text-sm">AI 股票分析系統</p>
         </div>
+
+        <CapitalSettingsPanel value={capitalSettings} onChange={setCapitalSettings} />
+        <TodayPicksPanel capitalSettings={capitalSettings} />
 
         {/* ===== 模式切換：短炒 / 中短線 / 指數 ===== */}
         <div className="flex gap-1 bg-white/5 border border-white/10 rounded-xl p-1 mb-6 w-fit">
@@ -497,7 +514,7 @@ export default function DashboardPage() {
                               <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">結構目標成本後淨盈利</div><div className="text-emerald-400 font-bold text-sm">HK${signal.estimatedNetProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
                             </div>
                           )}
-                          {hasCapitalInfo && <p className="px-5 pb-3 text-[10px] leading-relaxed text-slate-500">已扣估計買入及賣出成本 HK${(signal.estimatedCostsHKD ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}；只在成本後目標至少 HK${(signal.minimumNetProfitHKD ?? 1000).toLocaleString()} 時推介。目標價並非保證成交。</p>}
+                          {hasCapitalInfo && <p className="px-5 pb-3 text-[10px] leading-relaxed text-slate-500">已扣估計買入及賣出成本 HK${(signal.estimatedCostsHKD ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}；只在成本後目標至少 HK${(signal.minimumNetProfitHKD ?? 500).toLocaleString()} 時推介。目標價並非保證成交。</p>}
                           {typeof signal.riskRewardRatio === 'number' && (
                             <div className="px-5 pb-3 grid grid-cols-2 gap-3">
                               <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">回報／風險</div><div className="text-amber-400 font-bold text-sm">{signal.riskRewardRatio.toFixed(2)}R</div></div>
@@ -515,7 +532,24 @@ export default function DashboardPage() {
                           </div>
                           {signal.analysis && <div className="px-5 pb-2"><p className="text-slate-400 text-xs leading-relaxed line-clamp-3">{signal.analysis}</p></div>}
                           {signal.entryRule && <div className="px-5 pb-2"><p className="text-slate-500 text-[11px] leading-relaxed">入場：{signal.entryRule}</p></div>}
-                          {signal.invalidation && <div className="px-5 pb-4"><p className="text-red-300/80 text-[11px] leading-relaxed">失效：{signal.invalidation}</p></div>}
+                          {signal.invalidation && <div className="px-5 pb-3"><p className="text-red-300/80 text-[11px] leading-relaxed">失效：{signal.invalidation}</p></div>}
+                          {signal.catalystSummary && (
+                            <div className={`mx-5 mb-3 rounded-xl border p-3 ${signal.catalystStatus === 'verified-positive' ? 'bg-emerald-500/10 border-emerald-500/20' : signal.catalystStatus === 'event-risk' ? 'bg-red-500/10 border-red-500/20' : 'bg-slate-500/10 border-slate-500/20'}`}>
+                              <p className="text-slate-300 text-xs font-medium mb-1">催化／事件資料</p>
+                              <p className="text-slate-400 text-[11px] leading-relaxed">{signal.catalystSummary}</p>
+                              {signal.catalystHeadline && <p className="text-slate-300 text-[11px] leading-relaxed mt-1">新聞：{signal.catalystHeadline}</p>}
+                              {signal.catalystUrl && <a href={signal.catalystUrl} target="_blank" rel="noreferrer" className="text-blue-300 text-[11px] hover:underline mt-1 inline-block">查看原始新聞</a>}
+                              {signal.upcomingEarningsDate && <p className="text-amber-300 text-[11px] mt-1">業績日：{signal.upcomingEarningsDate}</p>}
+                            </div>
+                          )}
+                          {signal.recommendationReasons && signal.recommendationReasons.length > 0 && (
+                            <div className="mx-5 mb-4 rounded-xl bg-white/5 border border-white/10 p-3">
+                              <p className="text-slate-300 text-xs font-medium mb-2">推介原因</p>
+                              <ul className="space-y-1 text-slate-400 text-[11px] leading-relaxed list-disc pl-4">
+                                {signal.recommendationReasons.map((reason, index) => <li key={`${signal.id}-reason-${index}`}>{reason}</li>)}
+                              </ul>
+                            </div>
+                          )}
                           <div className="px-5 pb-4 flex items-center justify-between">
                             <div className="flex items-center gap-1.5 text-slate-500 text-xs"><Clock className="w-3 h-3" />日內計劃</div>
                             {signal.result_pct !== null && (
@@ -532,6 +566,7 @@ export default function DashboardPage() {
                 })}
               </div>
             )}
+            <TradeJournalPanel signals={signals} market={market} />
           </>
         )}
 
@@ -787,6 +822,14 @@ export default function DashboardPage() {
                           <div className="text-slate-200 font-bold text-sm">{resistance != null ? resistance.toFixed(2) : '—'}</div>
                         </div>
                       </div>
+
+                      {r.capitalFeasibility && (
+                        <div className={`mx-5 mb-3 rounded-xl border px-3 py-2 text-xs ${r.capitalFeasibility.feasible ? 'border-emerald-400/20 bg-emerald-500/5' : 'border-red-400/20 bg-red-500/5'}`}>
+                          <div className="flex justify-between"><span className="text-slate-400">按資金設定可買</span><span className={r.capitalFeasibility.feasible ? 'text-emerald-300' : 'text-red-300'}>{r.capitalFeasibility.shares ?? 0} 股</span></div>
+                          <div className="flex justify-between"><span className="text-slate-400">成本後估算</span><span className="text-white">HK${(r.capitalFeasibility.estimatedNetProfitHKD ?? 0).toFixed(0)} / 門檻 HK$500</span></div>
+                          <p className="mt-1 text-slate-500">{r.capitalFeasibility.reason}</p>
+                        </div>
+                      )}
 
                       <div className="px-5 pb-3 text-xs text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
                         {r.indicators?.volumeSpikeRatio != null && <span>量比 {r.indicators.volumeSpikeRatio.toFixed(2)}x</span>}
