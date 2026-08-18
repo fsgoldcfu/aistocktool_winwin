@@ -1,5 +1,4 @@
-import { buildCapitalPlan, type CapitalSettingsInput } from '../../../lib/capitalSettings';
-import { evaluateFutuUsStockNetProfit } from '../../../lib/shortTermRisk';
+import { buildCapitalPlan, estimateUsCapitalFeasibility, type CapitalSettingsInput } from '../../../lib/capitalSettings';
 import { WATCHLIST, fetchDailyHistory, fetchLivePrice, analyzeSymbol } from '@/lib/indexAnalysis';
 
 export const maxDuration = 120;
@@ -26,9 +25,7 @@ export async function GET(request: Request) {
     const plan = analysis.recommendation?.tradePlan;
     if (!plan) return null;
     const shares = Math.floor((capitalPlan.capitalPerPositionHKD / fxToHKD) / plan.entry);
-    if (shares < 1) return { feasible: false, shares, capitalAllocatedHKD: 0, estimatedNetProfitHKD: 0, reason: '每筆資金不足以買入 1 股。' };
-    const result = evaluateFutuUsStockNetProfit({ entryPrice: plan.entry, targetPrice: plan.target1, shares, oneWaySlippageBps: Number(process.env.INDEX_ONE_WAY_SLIPPAGE_BPS ?? 5), fxToHKD, minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 500) });
-    return { feasible: result.feasible, shares, capitalAllocatedHKD: shares * plan.entry * fxToHKD, estimatedNetProfitHKD: result.estimatedNetProfitHKD, estimatedCostsHKD: result.estimatedCostsHKD, minimumNetProfitHKD: result.minimumNetProfitHKD, reason: result.reason };
+    return estimateUsCapitalFeasibility({ entryPrice: plan.entry, targetPrice: plan.target1, capitalPlan, fxToHKD, oneWayCostBps: Number(process.env.INDEX_ONE_WAY_SLIPPAGE_BPS ?? 5), minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 500) });
   };
   if (requestUrl.searchParams.get('debug') === '1' && process.env.NODE_ENV !== 'production') {
     return json({ hasApiKey: Boolean(apiKey), environment: process.env.VERCEL_ENV || process.env.NODE_ENV || 'unknown' });
