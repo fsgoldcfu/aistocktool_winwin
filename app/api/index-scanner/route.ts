@@ -1,5 +1,5 @@
 import { buildCapitalPlan, estimateUsCapitalFeasibility, type CapitalSettingsInput } from '../../../lib/capitalSettings';
-import { WATCHLIST, fetchDailyHistory, fetchLivePrice, analyzeSymbol } from '@/lib/indexAnalysis';
+import { WATCHLIST, fetchStaticIndexHistory, fetchLivePrice, analyzeSymbol } from '@/lib/indexAnalysis';
 
 export const maxDuration = 120;
 export const dynamic = 'force-dynamic';
@@ -31,17 +31,15 @@ export async function GET(request: Request) {
     return json({ hasApiKey: Boolean(apiKey), environment: process.env.VERCEL_ENV || process.env.NODE_ENV || 'unknown' });
   }
 
-  if (!apiKey) {
-    return json({ status: 'DATA_UNAVAILABLE', error: '未設定 TWELVE_DATA_API_KEY，系統不會產生指數交易計劃。' }, 503);
-  }
-
   try {
     const results = [];
     for (const item of WATCHLIST) {
-      const bars = await fetchDailyHistory(item.symbol, apiKey, 10);
-      const livePriceResult = await fetchLivePrice(item.symbol, apiKey)
-        .then((price) => ({ price, source: 'twelve_data_price' as const, timestamp: new Date().toISOString() }))
-        .catch(() => ({ price: null, source: 'prior_close' as const, timestamp: new Date().toISOString() }));
+      const bars = fetchStaticIndexHistory(item.symbol);
+      const livePriceResult = apiKey
+        ? await fetchLivePrice(item.symbol, apiKey)
+            .then((price) => ({ price, source: 'twelve_data_price' as const, timestamp: new Date().toISOString() }))
+            .catch(() => ({ price: null, source: 'prior_close' as const, timestamp: new Date().toISOString() }))
+        : { price: null, source: 'prior_close' as const, timestamp: new Date().toISOString() };
       const analysis = analyzeSymbol(bars, {
         symbol: item.symbol,
         direction: item.direction,
@@ -65,6 +63,8 @@ export async function GET(request: Request) {
       status: 'OK',
       generatedAt: new Date().toISOString(),
       strategyVersion: 'multi-etf-daily-pullback-v3',
+      historySource: 'project-static-completed-daily-bars',
+      livePriceNotice: apiKey ? null : '未設定 TWELVE_DATA_API_KEY；指數只使用專案內最後完成日線的收市價，不顯示盤中現價。',
       results,
       capitalPlan,
     });

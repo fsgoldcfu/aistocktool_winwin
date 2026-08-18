@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { analyzeSymbol, WATCHLIST, type DailyBar } from '../lib/indexAnalysis';
+import { analyzeSymbol, fetchStaticIndexHistory, WATCHLIST, type DailyBar } from '../lib/indexAnalysis';
 
 function makeBars(): DailyBar[] {
   return Array.from({ length: 280 }, (_, index) => {
@@ -28,6 +28,11 @@ const analysis = analyzeSymbol([...bars].reverse(), {
 });
 
 assert.equal(WATCHLIST.map((item) => item.symbol).join(','), 'TQQQ,VOO,SPY,SSO', 'index watchlist must contain all four ETFs');
+for (const item of WATCHLIST) {
+  const staticBars = fetchStaticIndexHistory(item.symbol);
+  assert.ok(staticBars.length >= 210, `${item.symbol} static history must satisfy the daily strategy minimum`);
+  assert.match(staticBars[staticBars.length - 1].date, /^\d{4}-\d{2}-\d{2}$/, `${item.symbol} static history must retain ISO dates`);
+}
 assert.equal(analysis.symbol, 'TQQQ', 'symbol must be preserved in analysis output');
 assert.equal(analysis.latestDate, bars[bars.length - 1].date, 'input bars must be normalized in date order');
 assert.equal(analysis.data.signalUsesCompletedDailyBar, true, 'signals must declare completed-bar use');

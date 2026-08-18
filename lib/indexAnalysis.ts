@@ -1,4 +1,6 @@
 // lib/indexAnalysis.ts
+import fs from 'node:fs';
+import path from 'node:path';
 //
 // 多 ETF 日線分析引擎（TQQQ、VOO、SPY、SSO）：
 // - 只以已完成日線計算訊號，避免把盤中價格混入 SMA / RSI / ATR
@@ -249,6 +251,55 @@ export async function fetchDailyHistory(
     throw new Error(`Twelve Data 錯誤 (${symbol}): ${json.message || 'unknown'}`);
   }
   return normalizeBars(json.values);
+}
+
+const STATIC_INDEX_HISTORY_FILES: Record<string, string> = {
+  TQQQ: 'TQQQ.csv',
+  VOO: 'VOO.csv',
+  SPY: 'SPY.csv',
+  SSO: 'SSO.csv',
+};
+
+const staticIndexHistoryCache = new Map<string, DailyBar[]>();
+
+/**
+ * 讀取專案隨版本部署的已完成日線基準資料。此資料只會在更新 release 時更新，
+ * 不會在每次掃描重新消耗 Twelve Data 額度；盤中現價仍由 price endpoint 另外取得。
+ */
+export function fetchStaticIndexHistory(symbol: string): DailyBar[] {
+  const normalizedSymbol = symbol.toUpperCase();
+  const filename = STATIC_INDEX_HISTORY_FILES[normalizedSymbol];
+  if (!filename) throw new Error(`沒有 ${normalizedSymbol} 的靜態 ETF 歷史資料`);
+
+  const cached = staticIndexHistoryCache.get(normalizedSymbol);
+  if (cached) return cached.map((bar) => ({ ...bar }));
+
+  const csvPath = path.join(process.cwd(), 'data', 'index-history', filename);
+  if (!fs.existsSync(csvPath)) throw new Error(`靜態 ETF 歷史資料檔案不存在：${filename}`);
+  const lines = fs.readFileSync(csvPath, 'utf8').trim().split(/\r?\n/);
+  const header = lines.shift()?.split(',').map((value) => value.trim().toLowerCase()) || [];
+  const columns = Object.fromEntries(header.map((name, index) => [name, index]));
+  for (const required of ['date', 'open', 'high', 'low', 'close', 'volume']) {
+    if (columns[required] == null) throw new Error(`靜態 ETF CSV 缺少 ${required} 欄位：${filename}`);
+  }
+
+  const bars = lines.map((line) => {
+    const row = line.split(',');
+    return {
+      date: row[columns.date],
+      open: Number(row[columns.open]),
+      high: Number(row[columns.high]),
+      low: Number(row[columns.low]),
+      close: Number(row[columns.close]),
+      volume: Number(row[columns.volume]),
+    };
+  });
+  const normalized = normalizeBars(bars);
+  if (normalized.length < MIN_REQUIRED_BARS) {
+    throw new Error(`靜態 ETF 歷史資料不足 ${MIN_REQUIRED_BARS} 個交易日：${filename}`);
+  }
+  staticIndexHistoryCache.set(normalizedSymbol, normalized);
+  return normalized.map((bar) => ({ ...bar }));
 }
 
 export async function fetchRecentHistory(

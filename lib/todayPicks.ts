@@ -1,4 +1,4 @@
-import { WATCHLIST, analyzeSymbol, fetchDailyHistory, fetchLivePrice } from './indexAnalysis';
+import { WATCHLIST, analyzeSymbol, fetchStaticIndexHistory, fetchLivePrice } from './indexAnalysis';
 import { runHKScannerV1 } from './hkScannerV1';
 import { runUSScannerV3_7 } from './usScannerV3_7';
 import { buildCapitalPlan, estimateUsCapitalFeasibility, type CapitalSettingsInput } from './capitalSettings';
@@ -61,29 +61,43 @@ export async function runTodayPicks(thresholdSoftenerActive = false, capitalSett
   }
 
   const apiKey = process.env.TWELVE_DATA_API_KEY;
-  const [us, indices] = await Promise.all([
+  const [usOutcome, indexOutcome] = await Promise.allSettled([
     runUSScannerWithCapital(thresholdSoftenerActive, capitalSettings),
-    apiKey ? scanIndices(apiKey, capitalSettings) : Promise.resolve([]),
+    scanIndices(capitalSettings, apiKey),
   ]);
+  const us = usOutcome.status === 'fulfilled' ? usOutcome.value : null;
+  const indices = indexOutcome.status === 'fulfilled' ? indexOutcome.value : [];
+  const notices: string[] = [];
+  if (us?.marketClosedNotice) notices.push(us.marketClosedNotice);
+  if (usOutcome.status === 'rejected') notices.push('美股股票池資料暫時不可用（可能是 Twelve Data rate limit）；已保留可用的指數靜態日線分析。');
+  if (indexOutcome.status === 'rejected') notices.push('指數靜態日線分析暫時不可用。');
+  if (!apiKey) notices.push('未設定 TWELVE_DATA_API_KEY；指數只使用專案內最後完成日線的收市價，不顯示盤中現價。');
   return {
     market,
     generatedAt,
     title: '今日心水（美股＋指數）',
-    notice: us.marketClosedNotice || (!apiKey ? '未設定 TWELVE_DATA_API_KEY，暫不加入指數心水。' : null),
-    recommendations: [...us.recommendations, ...indices],
-    scanner: { tradeabilityThreshold: us.tradeabilityThreshold, qualifiedCandidates: us.qualifiedCandidates, marketPhase: us.marketPhase, capitalPlan: us.capitalPlan || buildCapitalPlan(capitalSettings) },
+    notice: notices.length ? notices.join(' ') : null,
+    recommendations: [...(us?.recommendations || []), ...indices],
+    scanner: {
+      tradeabilityThreshold: us?.tradeabilityThreshold ?? null,
+      qualifiedCandidates: us?.qualifiedCandidates ?? 0,
+      marketPhase: us?.marketPhase ?? 'data-unavailable',
+      capitalPlan: us?.capitalPlan || buildCapitalPlan(capitalSettings),
+    },
   };
 }
 
-async function scanIndices(apiKey: string, capitalSettings?: CapitalSettingsInput) {
+async function scanIndices(capitalSettings?: CapitalSettingsInput, apiKey?: string) {
   const capitalPlan = buildCapitalPlan(capitalSettings);
   const fxToHKD = Number(process.env.USDHKD_RATE ?? 7.8);
   const output = [];
   for (const item of WATCHLIST) {
-    const bars = await fetchDailyHistory(item.symbol, apiKey, 10);
-    const livePriceResult = await fetchLivePrice(item.symbol, apiKey)
-      .then((price) => ({ price, source: 'twelve_data_price' as const, timestamp: new Date().toISOString() }))
-      .catch(() => ({ price: null, source: 'prior_close' as const, timestamp: new Date().toISOString() }));
+    const bars = fetchStaticIndexHistory(item.symbol);
+    const livePriceResult = apiKey
+      ? await fetchLivePrice(item.symbol, apiKey)
+          .then((price) => ({ price, source: 'twelve_data_price' as const, timestamp: new Date().toISOString() }))
+          .catch(() => ({ price: null, source: 'prior_close' as const, timestamp: new Date().toISOString() }))
+      : { price: null, source: 'prior_close' as const, timestamp: new Date().toISOString() };
     const analysis = analyzeSymbol(bars, {
       symbol: item.symbol,
       direction: item.direction,
