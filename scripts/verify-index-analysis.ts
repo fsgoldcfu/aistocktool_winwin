@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { analyzeSymbol, type DailyBar } from '../lib/indexAnalysis';
+import { analyzeSymbol, WATCHLIST, type DailyBar } from '../lib/indexAnalysis';
 
 function makeBars(): DailyBar[] {
   return Array.from({ length: 280 }, (_, index) => {
@@ -19,6 +19,7 @@ function makeBars(): DailyBar[] {
 
 const bars = makeBars();
 const analysis = analyzeSymbol([...bars].reverse(), {
+  symbol: 'TQQQ',
   direction: 'long',
   livePrice: bars[bars.length - 1].close + 0.1,
   priceSource: 'twelve_data_price',
@@ -26,6 +27,8 @@ const analysis = analyzeSymbol([...bars].reverse(), {
   analysisAsOf: '2025-01-01T00:00:00.000Z',
 });
 
+assert.equal(WATCHLIST.map((item) => item.symbol).join(','), 'TQQQ,VOO,SPY,SSO', 'index watchlist must contain all four ETFs');
+assert.equal(analysis.symbol, 'TQQQ', 'symbol must be preserved in analysis output');
 assert.equal(analysis.latestDate, bars[bars.length - 1].date, 'input bars must be normalized in date order');
 assert.equal(analysis.data.signalUsesCompletedDailyBar, true, 'signals must declare completed-bar use');
 assert.equal(analysis.data.priceSource, 'twelve_data_price', 'price source must be preserved');
