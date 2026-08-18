@@ -1,8 +1,14 @@
 import { WATCHLIST, analyzeSymbol, fetchDailyHistory, fetchLivePrice } from './indexAnalysis';
 import { runHKScannerV1 } from './hkScannerV1';
 import { runUSScannerV3_7 } from './usScannerV3_7';
-import { buildCapitalPlan, type CapitalSettingsInput } from './capitalSettings';
-import { evaluateFutuUsStockNetProfit } from './shortTermRisk';
+import { buildCapitalPlan, estimateUsCapitalFeasibility, type CapitalSettingsInput } from './capitalSettings';
+
+// Compatibility boundary: deployment must use the matching scanner files, but this
+// cast prevents a stale one-argument scanner from breaking the whole build while
+// a repository is being updated. The complete release includes the two-argument versions.
+type CapitalAwareScanner<T> = (thresholdSoftenerActive?: boolean, capitalSettings?: CapitalSettingsInput) => Promise<T>;
+const runHKScannerWithCapital = runHKScannerV1 as unknown as CapitalAwareScanner<Awaited<ReturnType<typeof runHKScannerV1>>>;
+const runUSScannerWithCapital = runUSScannerV3_7 as unknown as CapitalAwareScanner<Awaited<ReturnType<typeof runUSScannerV3_7>>>;
 
 export type TodayPicksMarket = 'HK' | 'US' | 'CLOSED';
 
@@ -43,7 +49,7 @@ export async function runTodayPicks(thresholdSoftenerActive = false, capitalSett
   }
 
   if (market === 'HK') {
-    const result = await runHKScannerV1(thresholdSoftenerActive, capitalSettings);
+    const result = await runHKScannerWithCapital(thresholdSoftenerActive, capitalSettings);
     return {
       market,
       generatedAt,
@@ -56,7 +62,7 @@ export async function runTodayPicks(thresholdSoftenerActive = false, capitalSett
 
   const apiKey = process.env.TWELVE_DATA_API_KEY;
   const [us, indices] = await Promise.all([
-    runUSScannerV3_7(thresholdSoftenerActive, capitalSettings),
+    runUSScannerWithCapital(thresholdSoftenerActive, capitalSettings),
     apiKey ? scanIndices(apiKey, capitalSettings) : Promise.resolve([]),
   ]);
   return {
@@ -88,8 +94,7 @@ async function scanIndices(apiKey: string, capitalSettings?: CapitalSettingsInpu
     });
     if (analysis.recommendation.status === 'TRADEABLE') {
       const tradePlan = analysis.recommendation.tradePlan;
-      const shares = tradePlan ? Math.floor((capitalPlan.capitalPerPositionHKD / fxToHKD) / tradePlan.entry) : 0;
-      const costAfter = tradePlan && shares > 0 ? evaluateFutuUsStockNetProfit({ entryPrice: tradePlan.entry, targetPrice: tradePlan.target1, shares, oneWaySlippageBps: Number(process.env.INDEX_ONE_WAY_SLIPPAGE_BPS ?? 5), fxToHKD, minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 500) }) : null;
+      const costAfter = tradePlan ? estimateUsCapitalFeasibility({ entryPrice: tradePlan.entry, targetPrice: tradePlan.target1, capitalPlan, fxToHKD, oneWayCostBps: Number(process.env.INDEX_ONE_WAY_SLIPPAGE_BPS ?? 5), minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 500) }) : null;
       if (costAfter && !costAfter.feasible) continue;
       output.push({
         symbol: item.symbol,
@@ -104,7 +109,7 @@ async function scanIndices(apiKey: string, capitalSettings?: CapitalSettingsInpu
         category: 'index',
         analysis,
         capitalPlan,
-        capitalFeasibility: costAfter ? { ...costAfter, shares, capitalAllocatedHKD: shares * (tradePlan?.entry || 0) * fxToHKD } : null,
+        capitalFeasibility: costAfter,
       });
     }
   }
