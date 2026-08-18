@@ -17,7 +17,9 @@
 
 // ==================== 真實數據源（Finnhub API） ====================
 import { yfinanceData as financeAPI } from "./yfinanceData";
-import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateNetProfitEligibility } from './shortTermRisk';
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateFutuUsStockNetProfit } from './shortTermRisk';
+import { assessCatalyst, type CatalystAssessment, type EarningsEvidence } from './catalystAnalysis';
+import { buildCapitalPlan, type CapitalPlan, type CapitalSettingsInput } from './capitalSettings';
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedScanResult: { result: any; timestamp: number } | null = null;
@@ -38,6 +40,8 @@ interface Indicators {
 interface NewsItem {
   title: string;
   url?: string;
+  datetime?: number;
+  source?: string;
 }
 
 class YFinanceData {
@@ -105,8 +109,8 @@ const CONFIG = {
   maxHoldingMinutes: 90,          // intraday time stop，避免訊號變成無限期持倉
   minConfidence: 60,              // Minimum strategy confirmation score
   tradeabilityThreshold: 60,     // Minimum daily execution score
-  minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 1000),
-  estimatedOneWayCostBps: Number(process.env.US_ONE_WAY_COST_BPS ?? 12),
+  minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 500),
+  estimatedOneWaySlippageBps: Number(process.env.US_ONE_WAY_SLIPPAGE_BPS ?? 5),
   thresholdSoftenerEnabled: false, // 降維試槍開關
 
   // ===== 逆市股偵測（跌市優先推介逆市股）=====
@@ -114,11 +118,12 @@ const CONFIG = {
   counterTrendRelativeStrength: 0.01, // 個股強於大市 1% 先當「逆市股」
 };
 
-// 按你實際資金配置動態換算（程式內部運算用美金）
-const maxDailyCapitalUSD = CONFIG.maxDailyCapitalHKD / CONFIG.hkdToUsdRate;          // ≈ $12,820
-const capitalPerPositionUSD = maxDailyCapitalUSD / CONFIG.expectedPositionsToBuy;    // ≈ $6,410（預期買2隻時每隻嘅資金）
-const dailyProfitTargetUSD = CONFIG.dailyProfitTargetHKD / CONFIG.hkdToUsdRate;       // ≈ $128
-const minTargetProfitPerStockUSD = dailyProfitTargetUSD / CONFIG.expectedPositionsToBuy; // ≈ $64（每隻最低要賺嘅利潤）
+// 沒有由介面傳入設定時，沿用舊版假設；正式掃描會以每次 request 的 capitalPlan 覆蓋。
+const DEFAULT_CAPITAL_PLAN = buildCapitalPlan({
+  totalCapitalHKD: CONFIG.totalCapitalHKD,
+  dailyAllocationPercent: (CONFIG.maxDailyCapitalHKD / CONFIG.totalCapitalHKD) * 100,
+  maxOpenPositions: CONFIG.expectedPositionsToBuy,
+});
 
 const US_SECTORS: Record<string, string[]> = {
   // AI半導體與算力（加入ARM、INTC、QCOM、AMAT — 分析師6月大幅升級）
@@ -210,6 +215,13 @@ export interface V3_7Recommendation {
   bullishNews: boolean;
   newsHeadline: string;
   newsSentimentScore: number;
+  catalystStatus: CatalystAssessment['status'];
+  catalystSummary: string;
+  catalystEvidence: string[];
+  catalystHeadline?: string;
+  catalystUrl?: string;
+  upcomingEarningsDate?: string;
+  recommendationReasons: string[];
   
   confidence: number;
   riskRewardRatio: number;
@@ -243,6 +255,7 @@ export interface ScanResult {
   isDownMarket?: boolean;           // 是否為跌市模式
   tradeabilityThreshold: number;
   qualifiedCandidates: number;
+  capitalPlan?: CapitalPlan;
   marketClosedNotice?: string;
 }
 
@@ -557,15 +570,77 @@ async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
     const data = await response.json();
     if (!Array.isArray(data) || data.length === 0) return [];
 
-    return data.slice(0, 3).map((item: any) => ({
+    return data.slice(0, 8).map((item: any) => ({
       title: item.headline || "",
       url: item.url || "",
+      datetime: Number(item.datetime) || undefined,
+      source: item.source || undefined,
     }));
 
   } catch (error) {
     console.error(`[News] Error fetching news for ${symbol}:`, error);
     return [];
   }
+}
+
+interface EarningsEvent extends EarningsEvidence { symbol: string }
+let earningsCalendarCache: { expiresAt: number; events: EarningsEvent[] } | null = null;
+let earningsCalendarRequest: Promise<EarningsEvent[]> | null = null;
+
+async function getUSEarningsCalendar(): Promise<EarningsEvent[]> {
+  const nowMs = Date.now();
+  if (earningsCalendarCache && earningsCalendarCache.expiresAt > nowMs) return earningsCalendarCache.events;
+  if (earningsCalendarRequest) return earningsCalendarRequest;
+
+  earningsCalendarRequest = (async () => {
+    try {
+      const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "";
+      if (!FINNHUB_KEY) return [];
+      const now = new Date();
+      const from = new Date(now);
+      const to = new Date(now);
+      from.setDate(from.getDate() - 14);
+      to.setDate(to.getDate() + 8);
+      const formatDate = (date: Date) => date.toISOString().slice(0, 10);
+      const url = `https://finnhub.io/api/v1/calendar/earnings?from=${formatDate(from)}&to=${formatDate(to)}&token=${FINNHUB_KEY}`;
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!response.ok) return [];
+      const payload = await response.json();
+      const calendar = Array.isArray(payload?.earningsCalendar) ? payload.earningsCalendar : [];
+      const events = calendar
+        .filter((item: any) => typeof item?.symbol === 'string' && typeof item?.date === 'string')
+        .map((item: any) => ({
+          symbol: String(item.symbol).toUpperCase(),
+          date: item.date,
+          hour: item.hour || undefined,
+          epsActual: typeof item.epsActual === 'number' ? item.epsActual : null,
+          epsEstimate: typeof item.epsEstimate === 'number' ? item.epsEstimate : null,
+          revenueActual: typeof item.revenueActual === 'number' ? item.revenueActual : null,
+          revenueEstimate: typeof item.revenueEstimate === 'number' ? item.revenueEstimate : null,
+        }));
+      earningsCalendarCache = { events, expiresAt: nowMs + 60 * 60 * 1000 };
+      return events;
+    } catch (error) {
+      console.warn('[Earnings] unable to read earnings calendar:', error);
+      return [];
+    } finally {
+      earningsCalendarRequest = null;
+    }
+  })();
+  return earningsCalendarRequest;
+}
+
+async function getUSEarningsEvents(symbol: string): Promise<EarningsEvent[]> {
+  const events = await getUSEarningsCalendar();
+  return events.filter((item) => item.symbol === symbol.toUpperCase());
+}
+
+function selectCatalyst(symbol: string, news: NewsItem[], earnings: EarningsEvent[]): CatalystAssessment {
+  const today = new Date().toISOString().slice(0, 10);
+  const ordered = [...earnings].sort((a, b) => a.date.localeCompare(b.date));
+  const upcoming = ordered.find((item) => item.date >= today) ?? null;
+  const recent = [...ordered].reverse().find((item) => item.date < today) ?? null;
+  return assessCatalyst({ headlines: news, upcomingEarnings: upcoming, recentEarnings: recent });
 }
 
 function hasBullishNews(news: NewsItem[]): boolean {
@@ -634,11 +709,12 @@ function validateProfitFeasibility(
   takeProfitPrice: number,
   symbol: string,
   hkHour: number,
-  thresholdSoftenerActive: boolean
+  thresholdSoftenerActive: boolean,
+  capitalPlan: CapitalPlan
 ): { feasible: boolean; sharesCanBuy: number; expectedProfit: number; capitalAllocated: number; lotSize: number; reason: string } {
   const lotSize = 1; // US stocks typically trade in 1 share increments
   // 戰術變更: 資金按用戶實際每日可用資金 / 預期買入注數 計算
-  const capitalOptions = [capitalPerPositionUSD];
+  const capitalOptions = [capitalPlan.capitalPerPositionHKD / CONFIG.hkdToUsdRate];
   
   let bestShares = 0;
   let bestExpectedProfit = 0;
@@ -691,6 +767,7 @@ interface StockData {
   candles: Candle[];
   indicators: Indicators;
   news: NewsItem[];
+  catalyst: CatalystAssessment;
   volumeRatio: number;
   volumeSpike: boolean;
 }
@@ -708,7 +785,8 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
     }
     
     const indicators = yfinanceData.calculateIndicators(candles);
-    const news = await getUSStockNews(symbol);
+    const [news, earnings] = await Promise.all([getUSStockNews(symbol), getUSEarningsEvents(symbol)]);
+    const catalyst = selectCatalyst(symbol, news, earnings);
 
     const todayVolume = candles[candles.length - 1]?.volume || 0;
     const past5DaysVolumes = candles.slice(-6, -1).map(c => c.volume);
@@ -721,6 +799,7 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
       indicators,
       candles,
       news,
+      catalyst,
       volumeRatio,
       volumeSpike,
     };
@@ -739,9 +818,10 @@ function buildRecommendation(
   indexChangePercent: number,
   hkTimeInfo: ReturnType<typeof getHKTimeInfo>,
   isResonance: boolean = false,
-  thresholdSoftenerActive: boolean
+  thresholdSoftenerActive: boolean,
+  capitalPlan: CapitalPlan = DEFAULT_CAPITAL_PLAN
 ): { recommendation: V3_7Recommendation | null; debugReason: string } {
-  const { quote, indicators, candles, news, volumeRatio, volumeSpike } = data;
+  const { quote, indicators, candles, news, catalyst, volumeRatio, volumeSpike } = data;
   
   const currentPrice = quote.price;
   // 報價供應商以 previous close 計算的變幅，避免日線資料有／無當日未完成 bar 時訊號改變。
@@ -749,6 +829,11 @@ function buildRecommendation(
   const stockName = US_STOCK_NAMES[symbol] || symbol;
 
   let debugReason = ``;
+
+  if (catalyst.blockTrade) {
+    debugReason = `事件風險保護：${catalyst.summary}`;
+    return { recommendation: null, debugReason };
+  }
 
   // 美東 14:30 後只接受仍然上升的股票；以 America/New_York 計算，避免夏令時間令 HKT 固定時段錯位。
   if (hkTimeInfo.nyHour > 14 || (hkTimeInfo.nyHour === 14 && hkTimeInfo.nyMinute >= 30)) {
@@ -789,7 +874,7 @@ function buildRecommendation(
   }
   const { entryPrice: plannedEntryPrice, takeProfitPrice, stopLossPrice, resistanceLevel, resistanceSource, riskRewardRatio, entryRule, invalidation, maxHoldingMinutes } = riskPlanResult.plan;
 
-  const feasibilityInfo = validateProfitFeasibility(plannedEntryPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive);
+  const feasibilityInfo = validateProfitFeasibility(plannedEntryPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive, capitalPlan);
   
   if (!feasibilityInfo.feasible) {
     debugReason = `Profit Feasibility Check Failed: ${feasibilityInfo.reason}`;
@@ -797,11 +882,11 @@ function buildRecommendation(
   }
 
   // ===== 港幣顯示換算 + 逆市抗跌股判定 =====
-  const netProfitEligibility = evaluateNetProfitEligibility({
+  const netProfitEligibility = evaluateFutuUsStockNetProfit({
     entryPrice: plannedEntryPrice,
     targetPrice: takeProfitPrice,
     shares: feasibilityInfo.sharesCanBuy,
-    oneWayCostBps: CONFIG.estimatedOneWayCostBps,
+    oneWaySlippageBps: CONFIG.estimatedOneWaySlippageBps,
     fxToHKD: CONFIG.hkdToUsdRate,
     minimumNetProfitHKD: CONFIG.minimumNetProfitHKD,
   });
@@ -848,10 +933,12 @@ function buildRecommendation(
     confidence += 10;
   }
 
-  // Module 2: Stage 3 利好新聞爆破
-  if (hasBullishNews(news)) {
-    triggerReason += " | 利好新聞爆破";
-    confidence += 15;
+  // 可追溯的催化只作有限加分；未公布業績絕不當成正面預期。
+  if (catalyst.status === 'verified-positive') {
+    triggerReason += ` | 催化：${catalyst.primaryHeadline || catalyst.summary}`;
+    confidence += catalyst.scoreAdjustment;
+  } else if (catalyst.upcomingEarningsDate) {
+    triggerReason += ` | 業績窗口 ${catalyst.upcomingEarningsDate}（不作正面加分）`;
   }
 
   // 板塊共振拉滿信心
@@ -901,6 +988,14 @@ function buildRecommendation(
     return { recommendation: null, debugReason };
   }
   triggerReason += ` | ${tradeability.reason}`;
+  const recommendationReasons = [
+    `相對強度：當日 ${(changePercent * 100).toFixed(2)}%，相對指數 ${((changePercent - indexChangePercent) * 100).toFixed(2)}%。`,
+    `風險計劃：入場 $${plannedEntryPrice.toFixed(2)}、止蝕 $${stopLossPrice.toFixed(2)}、結構目標 $${takeProfitPrice.toFixed(2)}、${riskRewardRatio.toFixed(2)}R。`,
+    `可交易性：${tradeability.reason}`,
+    `成本後門檻：${netProfitEligibility.reason}`,
+    `催化／事件：${catalyst.summary}`,
+    ...catalyst.evidence,
+  ];
   
   return {
     recommendation: {
@@ -934,9 +1029,16 @@ function buildRecommendation(
       volumeRatio,
       volumeSpike,
       
-      bullishNews: hasBullishNews(news),
-      newsHeadline: news.length > 0 ? news[0].title : "",
-      newsSentimentScore: getNewsSentimentScore(news),
+      bullishNews: catalyst.status === 'verified-positive',
+      newsHeadline: catalyst.primaryHeadline || news[0]?.title || "",
+      newsSentimentScore: catalyst.status === 'verified-positive' ? 0.8 : 0.2,
+      catalystStatus: catalyst.status,
+      catalystSummary: catalyst.summary,
+      catalystEvidence: catalyst.evidence,
+      catalystHeadline: catalyst.primaryHeadline,
+      catalystUrl: catalyst.primaryUrl,
+      upcomingEarningsDate: catalyst.upcomingEarningsDate,
+      recommendationReasons,
       
       confidence,
       riskRewardRatio,
@@ -962,9 +1064,11 @@ function buildRecommendation(
 // MAIN SCANNER FUNCTION
 // ============================================================
 
-export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false): Promise<ScanResult> {
+export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false, capitalSettings?: CapitalSettingsInput): Promise<ScanResult> {
+  const capitalPlan = buildCapitalPlan(capitalSettings);
+  const canUseCache = capitalSettings == null;
   // ==================== Cache 檢查（15分鐘內直接返回） ====================
-  if (cachedScanResult && (Date.now() - cachedScanResult.timestamp) < SCAN_CACHE_TTL_MS) {
+  if (canUseCache && cachedScanResult && (Date.now() - cachedScanResult.timestamp) < SCAN_CACHE_TTL_MS) {
     const ageMinutes = Math.floor((Date.now() - cachedScanResult.timestamp) / 60000);
     console.log(`[US V3.7] ✅ 使用 Cache 數據（${ageMinutes} 分鐘前掃描），避免重複請求 Finnhub`);
     return cachedScanResult.result;
@@ -1020,7 +1124,8 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     };
   }
 
-  console.log(`[US V3.7] 單注資金: $${capitalPerPositionUSD.toFixed(0)} USD（≈HK$${(capitalPerPositionUSD * CONFIG.hkdToUsdRate).toFixed(0)}），最低目標利潤: $${minTargetProfitPerStockUSD.toFixed(0)} USD/股（≈HK$${(minTargetProfitPerStockUSD * CONFIG.hkdToUsdRate).toFixed(0)}）`);
+  const capitalPerPositionUSD = capitalPlan.capitalPerPositionHKD / CONFIG.hkdToUsdRate;
+  console.log(`[US V3.7] 本金 HK$${capitalPlan.totalCapitalHKD.toFixed(0)}；每日配置 ${capitalPlan.dailyAllocationPercent.toFixed(2)}%；每筆資金 HK$${capitalPlan.capitalPerPositionHKD.toFixed(0)}（≈$${capitalPerPositionUSD.toFixed(0)} USD）`);
   if (thresholdSoftenerActive) {
     console.log(`[US V3.7] ⚠️ 降維試槍開關已啟用：利潤門檻打8折，RSI放寬至>45。`);
   }
@@ -1108,7 +1213,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     if (hasBullishNews(data.news)) {
       currentStageLabel = "利好新聞爆破";
       currentTriggerReason = `利好新聞: ${data.news[0].title}`; // Use first news headline
-      recommendationResult = buildRecommendation(symbol, data, 3, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive);
+      recommendationResult = buildRecommendation(symbol, data, 3, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
         stage3CandidatesCount++;
@@ -1122,7 +1227,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     if (hkTimeInfo.marketPhase === "opening-hour") {
       currentStageLabel = "開市動量";
       currentTriggerReason = `今日漲幅 ${(data.quote.changePercent * 100).toFixed(2)}%`;
-      recommendationResult = buildRecommendation(symbol, data, 2, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive);
+      recommendationResult = buildRecommendation(symbol, data, 2, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
         stage2CandidatesCount++;
@@ -1137,7 +1242,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
       const sectorName = Object.keys(US_SECTORS).find(key => US_SECTORS[key].includes(symbol)) || "未知板塊";
       currentStageLabel = "玄金題材暴動";
       currentTriggerReason = `🔥【玄金題材暴動】${sectorName} 板塊資金瘋狂湧入，共振爆發！`;
-      recommendationResult = buildRecommendation(symbol, data, 1, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, true, thresholdSoftenerActive);
+      recommendationResult = buildRecommendation(symbol, data, 1, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, true, thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
         stage1CandidatesCount++;
@@ -1150,7 +1255,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     // Stage 4: Fallback (保底防咬)
     currentStageLabel = "保底篩選";
     currentTriggerReason = "技術面覆盤";
-    recommendationResult = buildRecommendation(symbol, data, 4, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive);
+    recommendationResult = buildRecommendation(symbol, data, 4, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
     if (recommendationResult.recommendation) {
       recommendations.push(recommendationResult.recommendation);
       stage4CandidatesCount++;
@@ -1187,7 +1292,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     rejectedStocks.forEach(stock => console.log(`- ${stock.symbol}: ${stock.reason}`));
   }
   
-  const finalResult = {
+  const finalResult: ScanResult = {
     recommendations: finalRecommendations,
     scanTime: new Date().toISOString(),
     hkTime: hkTimeInfo.hkTimeStr,
@@ -1202,10 +1307,11 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     isDownMarket,
     tradeabilityThreshold: CONFIG.tradeabilityThreshold,
     qualifiedCandidates: recommendations.filter((recommendation) => recommendation.tradeabilityScore >= CONFIG.tradeabilityThreshold).length,
+    capitalPlan,
   };
 
   // 存入 Cache，15分鐘內重複請求直接返回
-  cachedScanResult = { result: finalResult, timestamp: Date.now() };
+  if (canUseCache) cachedScanResult = { result: finalResult, timestamp: Date.now() };
   console.log(`[US V3.7] 💾 掃描結果已存入 Cache，15分鐘內有效`);
 
   return finalResult;
