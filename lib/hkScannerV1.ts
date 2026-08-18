@@ -12,7 +12,8 @@
  */
 
 import { hkStockData, type HKCandle as Candle, type HKQuote as Quote, type HKIndicators as Indicators } from "./hkStockData";
-import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateNetProfitEligibility } from "./shortTermRisk";
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateFutuHkStockNetProfit } from "./shortTermRisk";
+import { buildCapitalPlan, type CapitalPlan, type CapitalSettingsInput } from './capitalSettings';
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedHKScanResult: { result: any; timestamp: number } | null = null;
@@ -38,17 +39,22 @@ const HK_CONFIG = {
   maxHoldingMinutes: 120,
   minConfidence: 60,
   tradeabilityThreshold: 60,
-  minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 1000),
-  estimatedOneWayCostBps: Number(process.env.HK_ONE_WAY_COST_BPS ?? 20),
+  minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 500),
+  estimatedOneWaySlippageBps: Number(process.env.HK_ONE_WAY_SLIPPAGE_BPS ?? 5),
+  commissionRate: Number(process.env.HK_COMMISSION_RATE ?? 0),
+  platformFeePerOrder: Number(process.env.HK_PLATFORM_FEE_PER_ORDER ?? 15),
   thresholdSoftenerEnabled: false,
 
   downMarketThreshold: -0.003,        // 恒指跌幅 > 0.3% 視為跌市
   counterTrendRelativeStrength: 0.01, // 個股強於大市 1% 先當「逆市股」
 };
 
-// 港股每注資金 / 每隻最低目標利潤（直接用 HKD，唔經過匯率）
-const capitalPerPositionHKD = HK_CONFIG.maxDailyCapitalHKD / HK_CONFIG.expectedPositionsToBuy; // ≈ HK$50,000
-const minTargetProfitPerStockHKD = HK_CONFIG.dailyProfitTargetHKD / HK_CONFIG.expectedPositionsToBuy; // ≈ HK$500
+// 沒有由介面傳入設定時，沿用舊版資金假設。
+const DEFAULT_CAPITAL_PLAN = buildCapitalPlan({
+  totalCapitalHKD: HK_CONFIG.totalCapitalHKD,
+  dailyAllocationPercent: (HK_CONFIG.maxDailyCapitalHKD / HK_CONFIG.totalCapitalHKD) * 100,
+  maxOpenPositions: HK_CONFIG.expectedPositionsToBuy,
+});
 
 // ============================================================
 // 港股股票池（可按需要增減）
@@ -126,6 +132,10 @@ export interface HKRecommendation {
   maxHoldingMinutes: number;
   tradeabilityScore: number;
   tradeabilityReason: string;
+  catalystStatus: 'unavailable';
+  catalystSummary: string;
+  catalystEvidence: string[];
+  recommendationReasons: string[];
   debugReason?: string;
 }
 
@@ -143,6 +153,7 @@ export interface HKScanResult {
   isDownMarket: boolean;
   tradeabilityThreshold: number;
   qualifiedCandidates: number;
+  capitalPlan?: CapitalPlan;
   marketClosedNotice?: string;
 }
 
@@ -286,15 +297,16 @@ function validateProfitFeasibilityHK(
   symbol: string,
   currentPrice: number,
   takeProfitPrice: number,
+  capitalPlan: CapitalPlan,
 ): { feasible: boolean; sharesCanBuy: number; expectedProfitHKD: number; capitalAllocatedHKD: number; lotSize: number; reason: string } {
   const lotSize = getConfiguredHKBoardLot(symbol);
   if (!lotSize) {
     return { feasible: false, sharesCanBuy: 0, expectedProfitHKD: 0, capitalAllocatedHKD: 0, lotSize: 0, reason: `未設定 ${symbol} 的真實每手股數（HK_BOARD_LOT_MAP_JSON）；不能把 1 手當作 1 股。` };
   }
 
-  const sharesCanBuy = Math.floor(capitalPerPositionHKD / currentPrice / lotSize) * lotSize;
+  const sharesCanBuy = Math.floor(capitalPlan.capitalPerPositionHKD / currentPrice / lotSize) * lotSize;
   if (sharesCanBuy <= 0) {
-    return { feasible: false, sharesCanBuy: 0, expectedProfitHKD: 0, capitalAllocatedHKD: 0, lotSize, reason: `每注資金 HK$${capitalPerPositionHKD.toFixed(0)} 不足以買入 ${symbol} 的一手 ${lotSize} 股。` };
+    return { feasible: false, sharesCanBuy: 0, expectedProfitHKD: 0, capitalAllocatedHKD: 0, lotSize, reason: `每注資金 HK$${capitalPlan.capitalPerPositionHKD.toFixed(0)} 不足以買入 ${symbol} 的一手 ${lotSize} 股。` };
   }
 
   const expectedProfitHKD = (takeProfitPrice - currentPrice) * sharesCanBuy;
@@ -353,7 +365,8 @@ function buildHKRecommendation(
   triggerReason: string,
   indexChangePercent: number,
   isResonance: boolean,
-  thresholdSoftenerActive: boolean
+  thresholdSoftenerActive: boolean,
+  capitalPlan: CapitalPlan = DEFAULT_CAPITAL_PLAN
 ): { recommendation: HKRecommendation | null; debugReason: string } {
   const { quote, indicators, candles, news, volumeRatio, volumeSpike } = data;
   const currentPrice = quote.price;
@@ -394,18 +407,20 @@ function buildHKRecommendation(
   }
   const { entryPrice: plannedEntryPrice, takeProfitPrice, stopLossPrice, resistanceLevel, resistanceSource, riskRewardRatio, entryRule, invalidation, maxHoldingMinutes } = riskPlanResult.plan;
 
-  const feasibilityInfo = validateProfitFeasibilityHK(symbol, plannedEntryPrice, takeProfitPrice);
+  const feasibilityInfo = validateProfitFeasibilityHK(symbol, plannedEntryPrice, takeProfitPrice, capitalPlan);
   if (!feasibilityInfo.feasible) {
     debugReason = `利潤可行性檢查未通過: ${feasibilityInfo.reason}`;
     return { recommendation: null, debugReason };
   }
 
-  const netProfitEligibility = evaluateNetProfitEligibility({
+  const netProfitEligibility = evaluateFutuHkStockNetProfit({
     entryPrice: plannedEntryPrice,
     targetPrice: takeProfitPrice,
     shares: feasibilityInfo.sharesCanBuy,
-    oneWayCostBps: HK_CONFIG.estimatedOneWayCostBps,
+    oneWaySlippageBps: HK_CONFIG.estimatedOneWaySlippageBps,
     minimumNetProfitHKD: HK_CONFIG.minimumNetProfitHKD,
+    commissionRate: HK_CONFIG.commissionRate,
+    platformFeePerOrder: HK_CONFIG.platformFeePerOrder,
   });
   if (!netProfitEligibility.feasible) {
     debugReason = `成本後淨盈利檢查未通過: ${netProfitEligibility.reason}`;
@@ -474,6 +489,14 @@ function buildHKRecommendation(
     return { recommendation: null, debugReason };
   }
   triggerReason += ` | ${tradeability.reason}`;
+  const catalystSummary = '港股可信新聞與業績日曆資料源尚未接通；此推薦沒有使用新聞或業績利好加分。';
+  const recommendationReasons = [
+    `相對強度：當日 ${(changePercent * 100).toFixed(2)}%，相對恒指 ${((changePercent - indexChangePercent) * 100).toFixed(2)}%。`,
+    `風險計劃：入場 HK$${plannedEntryPrice.toFixed(2)}、止蝕 HK$${stopLossPrice.toFixed(2)}、結構目標 HK$${takeProfitPrice.toFixed(2)}、${riskRewardRatio.toFixed(2)}R。`,
+    `可交易性：${tradeability.reason}`,
+    `成本後門檻：${netProfitEligibility.reason}`,
+    `催化／事件：${catalystSummary}`,
+  ];
 
   return {
     recommendation: {
@@ -521,6 +544,10 @@ function buildHKRecommendation(
       maxHoldingMinutes,
       tradeabilityScore: tradeability.score,
       tradeabilityReason: tradeability.reason,
+      catalystStatus: 'unavailable',
+      catalystSummary,
+      catalystEvidence: [catalystSummary],
+      recommendationReasons,
       debugReason,
     },
     debugReason,
@@ -531,8 +558,10 @@ function buildHKRecommendation(
 // MAIN SCANNER FUNCTION
 // ============================================================
 
-export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): Promise<HKScanResult> {
-  if (cachedHKScanResult && Date.now() - cachedHKScanResult.timestamp < HK_SCAN_CACHE_TTL_MS) {
+export async function runHKScannerV1(thresholdSoftenerActive: boolean = false, capitalSettings?: CapitalSettingsInput): Promise<HKScanResult> {
+  const capitalPlan = buildCapitalPlan(capitalSettings);
+  const canUseCache = capitalSettings == null;
+  if (canUseCache && cachedHKScanResult && Date.now() - cachedHKScanResult.timestamp < HK_SCAN_CACHE_TTL_MS) {
     return cachedHKScanResult.result;
   }
 
@@ -582,7 +611,7 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     };
   }
 
-  console.log(`[HK Scanner V1] 單注資金: HK$${capitalPerPositionHKD.toFixed(0)}, 最低目標利潤: HK$${minTargetProfitPerStockHKD.toFixed(0)}/股`);
+  console.log(`[HK Scanner V1] 本金 HK$${capitalPlan.totalCapitalHKD.toFixed(0)}；每日配置 ${capitalPlan.dailyAllocationPercent.toFixed(2)}%；每筆資金 HK$${capitalPlan.capitalPerPositionHKD.toFixed(0)}`);
 
   // 恒生指數變幅（用作大市基準）
   const hsiQuote = await hkStockData.fetchQuote("HSI");
@@ -680,7 +709,7 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
 
     // Stage 3: 利好新聞爆破（暫時 stub，news永遠空，唔會觸發）
     if (hasBullishNews(data.news)) {
-      result = buildHKRecommendation(symbol, data, 3, "利好新聞爆破", `利好新聞: ${data.news[0].title}`, indexChangePercent, resonanceStocks.has(symbol), thresholdSoftenerActive);
+      result = buildHKRecommendation(symbol, data, 3, "利好新聞爆破", `利好新聞: ${data.news[0].title}`, indexChangePercent, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (result.recommendation) {
         recommendations.push(result.recommendation);
         stage3Count++;
@@ -692,7 +721,7 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
 
     // Stage 2: 開市動量
     if (timeInfo.marketPhase === "opening-hour") {
-      result = buildHKRecommendation(symbol, data, 2, "開市動量", `今日漲幅 ${(data.quote.changePercent * 100).toFixed(2)}%`, indexChangePercent, resonanceStocks.has(symbol), thresholdSoftenerActive);
+      result = buildHKRecommendation(symbol, data, 2, "開市動量", `今日漲幅 ${(data.quote.changePercent * 100).toFixed(2)}%`, indexChangePercent, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (result.recommendation) {
         recommendations.push(result.recommendation);
         stage2Count++;
@@ -705,7 +734,7 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     // Stage 1: 板塊共振
     if (resonanceStocks.has(symbol)) {
       const sectorName = Object.keys(HK_SECTORS).find((key) => HK_SECTORS[key].includes(symbol)) || "未知板塊";
-      result = buildHKRecommendation(symbol, data, 1, "板塊共振", `🔥${sectorName}板塊資金湧入，共振爆發！`, indexChangePercent, true, thresholdSoftenerActive);
+      result = buildHKRecommendation(symbol, data, 1, "板塊共振", `🔥${sectorName}板塊資金湧入，共振爆發！`, indexChangePercent, true, thresholdSoftenerActive, capitalPlan);
       if (result.recommendation) {
         recommendations.push(result.recommendation);
         stage1Count++;
@@ -716,7 +745,7 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     }
 
     // Stage 4: 保底篩選
-    result = buildHKRecommendation(symbol, data, 4, "保底篩選", "技術面覆盤", indexChangePercent, resonanceStocks.has(symbol), thresholdSoftenerActive);
+    result = buildHKRecommendation(symbol, data, 4, "保底篩選", "技術面覆盤", indexChangePercent, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
     if (result.recommendation) {
       recommendations.push(result.recommendation);
       stage4Count++;
@@ -760,8 +789,9 @@ export async function runHKScannerV1(thresholdSoftenerActive: boolean = false): 
     isDownMarket,
     tradeabilityThreshold: HK_CONFIG.tradeabilityThreshold,
     qualifiedCandidates: recommendations.filter((recommendation) => recommendation.tradeabilityScore >= HK_CONFIG.tradeabilityThreshold).length,
+    capitalPlan,
   };
 
-  cachedHKScanResult = { result: finalResult, timestamp: Date.now() };
+  if (canUseCache) cachedHKScanResult = { result: finalResult, timestamp: Date.now() };
   return finalResult;
 }
