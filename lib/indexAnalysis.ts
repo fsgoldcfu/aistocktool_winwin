@@ -1,6 +1,6 @@
 // lib/indexAnalysis.ts
 //
-// TQQQ 日線分析引擎：
+// 多 ETF 日線分析引擎（TQQQ、VOO、SPY、SSO）：
 // - 只以已完成日線計算訊號，避免把盤中價格混入 SMA / RSI / ATR
 // - 將「觀察區」與「可交易計劃」分開；沒有確認、止蝕或足夠回報風險比時不產生交易計劃
 // - 提供含進場、止蝕、目標、最長持有日和成本假設的交易級歷史回測
@@ -124,18 +124,22 @@ export interface AnalysisResult {
     bollingerUpperPullback: SignalBacktestStats;
   };
   strategyBacktest: StrategyBacktest;
+  symbol?: string;
   recommendation: Recommendation;
 }
 
 // ---------- 1. 資料設定 ----------
 
 export const WATCHLIST: WatchlistItem[] = [
-  { symbol: 'TQQQ', name: 'TQQQ 3倍做多', direction: 'long' },
+  { symbol: 'TQQQ', name: 'TQQQ 3倍做多 Nasdaq-100', direction: 'long' },
+  { symbol: 'VOO', name: 'VOO Vanguard S&P 500', direction: 'long' },
+  { symbol: 'SPY', name: 'SPY SPDR S&P 500', direction: 'long' },
+  { symbol: 'SSO', name: 'SSO 2倍做多 S&P 500', direction: 'long' },
 ];
 
 const TD_BASE = 'https://api.twelvedata.com/time_series';
 const MIN_REQUIRED_BARS = 210;
-const STRATEGY_VERSION = 'tqqq-daily-pullback-v2';
+const STRATEGY_VERSION = 'multi-etf-daily-pullback-v3';
 
 const STRATEGY_CONFIG = {
   atrPeriod: 14,
@@ -690,7 +694,7 @@ function buildStrategyBacktest(
   // 這不是參數最佳化器；任何日後調參都必須重新切分並保留未見 hold-out。
   const splitIndex = Math.max(MIN_REQUIRED_BARS + 1, Math.floor(bars.length * 0.7));
   return {
-    name: '強勢趨勢下 RSI / 布林回歸做多（固定規則）',
+    name: '強勢趨勢下 RSI / 布林回歸做多（固定規則，按 ETF 分開驗證）',
     inSample: simulateLongPullbackStrategy(bars, sma50, sma200, atr14, rsi14, bb, MIN_REQUIRED_BARS, splitIndex),
     outOfSample: simulateLongPullbackStrategy(bars, sma50, sma200, atr14, rsi14, bb, splitIndex, bars.length),
     assumptions: `訊號日收市後下一日開市進場；${STRATEGY_CONFIG.maxHoldingDays} 日 time stop；1.0 ATR stop；${STRATEGY_CONFIG.target1R}R target；每邊 ${STRATEGY_CONFIG.oneWayCostBps} bps 成本；同日 stop / target 按 stop 優先。`,
@@ -854,6 +858,7 @@ export function analyzeSymbol(
   inputBars: DailyBar[],
   config: {
     direction: 'long' | 'short';
+    symbol?: string;
     livePrice?: number;
     priceSource?: PriceSource;
     priceTimestamp?: string;
@@ -939,6 +944,7 @@ export function analyzeSymbol(
       };
 
   return {
+    symbol: config.symbol,
     latestDate: bars[last].date,
     latestClose,
     signalClose,
