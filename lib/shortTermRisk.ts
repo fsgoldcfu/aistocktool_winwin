@@ -251,3 +251,178 @@ export function evaluateNetProfitEligibility(input: NetProfitEligibilityInput): 
       : `結構目標的估計成本後淨盈利只有 HK$${estimatedNetProfitHKD.toFixed(0)}，低於 HK$${minimumNetProfitHKD.toFixed(0)} 推薦門檻。`,
   };
 }
+
+export interface FutuCostBreakdown {
+  buyKnownFees: number;
+  sellKnownFees: number;
+  buySlippage: number;
+  sellSlippage: number;
+  totalEstimatedCosts: number;
+}
+
+export interface FutuNetProfitEligibilityInput {
+  entryPrice: number;
+  targetPrice: number;
+  shares: number;
+  oneWaySlippageBps: number;
+  minimumNetProfitHKD: number;
+  fxToHKD?: number;
+}
+
+export interface FutuNetProfitEligibilityResult extends NetProfitEligibilityResult {
+  costBreakdown: FutuCostBreakdown;
+}
+
+function buildExplicitCostNetProfitResult(
+  input: FutuNetProfitEligibilityInput,
+  costBreakdown: FutuCostBreakdown,
+): FutuNetProfitEligibilityResult {
+  const fxToHKD = input.fxToHKD ?? 1;
+  const entryPrice = Number(input.entryPrice);
+  const targetPrice = Number(input.targetPrice);
+  const shares = Math.floor(Number(input.shares));
+  const minimumNetProfitHKD = Number(input.minimumNetProfitHKD);
+
+  if (
+    !Number.isFinite(entryPrice) || entryPrice <= 0 ||
+    !Number.isFinite(targetPrice) || targetPrice <= entryPrice ||
+    !Number.isFinite(shares) || shares <= 0 ||
+    !Number.isFinite(fxToHKD) || fxToHKD <= 0 ||
+    !Number.isFinite(minimumNetProfitHKD) || minimumNetProfitHKD <= 0 ||
+    !Number.isFinite(costBreakdown.totalEstimatedCosts) || costBreakdown.totalEstimatedCosts < 0
+  ) {
+    return {
+      feasible: false,
+      grossProfitLocal: 0,
+      estimatedCostsLocal: 0,
+      estimatedNetProfitLocal: 0,
+      estimatedGrossProfitHKD: 0,
+      estimatedCostsHKD: 0,
+      estimatedNetProfitHKD: 0,
+      minimumNetProfitHKD: Number.isFinite(minimumNetProfitHKD) ? minimumNetProfitHKD : 0,
+      reason: '入場價、結構目標、可交易股數、富途成本或淨盈利門檻無效。',
+      costBreakdown,
+    };
+  }
+
+  const grossProfitLocal = (targetPrice - entryPrice) * shares;
+  const estimatedNetProfitLocal = grossProfitLocal - costBreakdown.totalEstimatedCosts;
+  const estimatedGrossProfitHKD = grossProfitLocal * fxToHKD;
+  const estimatedCostsHKD = costBreakdown.totalEstimatedCosts * fxToHKD;
+  const estimatedNetProfitHKD = estimatedNetProfitLocal * fxToHKD;
+  const feasible = estimatedNetProfitHKD >= minimumNetProfitHKD;
+
+  return {
+    feasible,
+    grossProfitLocal,
+    estimatedCostsLocal: costBreakdown.totalEstimatedCosts,
+    estimatedNetProfitLocal,
+    estimatedGrossProfitHKD,
+    estimatedCostsHKD,
+    estimatedNetProfitHKD,
+    minimumNetProfitHKD,
+    reason: feasible
+      ? `按富途費用及滑點模型，結構目標的估計成本後淨盈利 HK$${estimatedNetProfitHKD.toFixed(0)}，達到 HK$${minimumNetProfitHKD.toFixed(0)} 推薦門檻。`
+      : `按富途費用及滑點模型，結構目標的估計成本後淨盈利只有 HK$${estimatedNetProfitHKD.toFixed(0)}，低於 HK$${minimumNetProfitHKD.toFixed(0)} 推薦門檻。`,
+    costBreakdown,
+  };
+}
+
+function futuCappedPerOrderFee(notionalUSD: number, shares: number, perShare: number, minimum: number): number {
+  const raw = shares * perShare;
+  // 富途規則：每單最低費用優先於 0.5% 名義金額上限的衝突情況。
+  return Math.max(minimum, Math.min(notionalUSD * 0.005, raw));
+}
+
+/**
+ * 富途香港帳戶的美股普通正股／ETF fixed-plan 費用模型。
+ * 包含每股佣金、平台費、結算費，以及只在賣出時計的 SEC、FINRA TAF 和 CAT；
+ * spread／market-impact 仍由可調 oneWaySlippageBps 保守估計。
+ */
+export function evaluateFutuUsStockNetProfit(input: FutuNetProfitEligibilityInput): FutuNetProfitEligibilityResult {
+  const entryPrice = Number(input.entryPrice);
+  const targetPrice = Number(input.targetPrice);
+  const shares = Math.floor(Number(input.shares));
+  const oneWaySlippageBps = Number(input.oneWaySlippageBps);
+  const entryNotional = entryPrice * shares;
+  const exitNotional = targetPrice * shares;
+
+  const invalid = !Number.isFinite(entryNotional) || !Number.isFinite(exitNotional) || shares <= 0 ||
+    !Number.isFinite(oneWaySlippageBps) || oneWaySlippageBps < 0;
+  if (invalid) {
+    return buildExplicitCostNetProfitResult(input, { buyKnownFees: 0, sellKnownFees: 0, buySlippage: 0, sellSlippage: 0, totalEstimatedCosts: 0 });
+  }
+
+  const buyKnownFees =
+    futuCappedPerOrderFee(entryNotional, shares, 0.0049, 0.99) +
+    futuCappedPerOrderFee(entryNotional, shares, 0.005, 1) +
+    shares * 0.003;
+  const sellKnownFees =
+    futuCappedPerOrderFee(exitNotional, shares, 0.0049, 0.99) +
+    futuCappedPerOrderFee(exitNotional, shares, 0.005, 1) +
+    shares * 0.003 +
+    Math.max(0.01, exitNotional * 0.0000206) +
+    Math.min(9.79, Math.max(0.01, shares * 0.000195)) +
+    shares * 0.000003;
+  const buySlippage = entryNotional * (oneWaySlippageBps / 10_000);
+  const sellSlippage = exitNotional * (oneWaySlippageBps / 10_000);
+
+  return buildExplicitCostNetProfitResult(input, {
+    buyKnownFees,
+    sellKnownFees,
+    buySlippage,
+    sellSlippage,
+    totalEstimatedCosts: buyKnownFees + sellKnownFees + buySlippage + sellSlippage,
+  });
+}
+
+/**
+ * 富途香港帳戶的港股普通正股費用模型。user screenshot 顯示佣金免費期，
+ * 所以 commissionRate 預設 0；非免費期可透過 HK_COMMISSION_RATE 覆蓋。
+ */
+export function evaluateFutuHkStockNetProfit(input: FutuNetProfitEligibilityInput & {
+  commissionRate?: number;
+  platformFeePerOrder?: number;
+  stampDutyExempt?: boolean;
+}): FutuNetProfitEligibilityResult {
+  const entryPrice = Number(input.entryPrice);
+  const targetPrice = Number(input.targetPrice);
+  const shares = Math.floor(Number(input.shares));
+  const oneWaySlippageBps = Number(input.oneWaySlippageBps);
+  const entryNotional = entryPrice * shares;
+  const exitNotional = targetPrice * shares;
+  const commissionRate = Number(input.commissionRate ?? 0);
+  const platformFeePerOrder = Number(input.platformFeePerOrder ?? 15);
+  const stampDutyExempt = input.stampDutyExempt === true;
+
+  const invalid = !Number.isFinite(entryNotional) || !Number.isFinite(exitNotional) || shares <= 0 ||
+    !Number.isFinite(oneWaySlippageBps) || oneWaySlippageBps < 0 ||
+    !Number.isFinite(commissionRate) || commissionRate < 0 ||
+    !Number.isFinite(platformFeePerOrder) || platformFeePerOrder < 0;
+  if (invalid) {
+    return buildExplicitCostNetProfitResult(input, { buyKnownFees: 0, sellKnownFees: 0, buySlippage: 0, sellSlippage: 0, totalEstimatedCosts: 0 });
+  }
+
+  const hkKnownFee = (notional: number): number => {
+    const commission = commissionRate > 0 ? Math.max(3, notional * commissionRate) : 0;
+    const stampDuty = stampDutyExempt ? 0 : Math.ceil(notional * 0.001);
+    const settlement = notional * 0.000042;
+    const trading = Math.max(0.01, notional * 0.0000565);
+    const sfc = Math.max(0.01, notional * 0.000027);
+    const frc = notional * 0.0000015;
+    return commission + platformFeePerOrder + stampDuty + settlement + trading + sfc + frc;
+  };
+
+  const buyKnownFees = hkKnownFee(entryNotional);
+  const sellKnownFees = hkKnownFee(exitNotional);
+  const buySlippage = entryNotional * (oneWaySlippageBps / 10_000);
+  const sellSlippage = exitNotional * (oneWaySlippageBps / 10_000);
+
+  return buildExplicitCostNetProfitResult(input, {
+    buyKnownFees,
+    sellKnownFees,
+    buySlippage,
+    sellSlippage,
+    totalEstimatedCosts: buyKnownFees + sellKnownFees + buySlippage + sellSlippage,
+  });
+}
