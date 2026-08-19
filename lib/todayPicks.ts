@@ -83,6 +83,8 @@ export async function runTodayPicks(thresholdSoftenerActive = false, capitalSett
       qualifiedCandidates: us?.qualifiedCandidates ?? 0,
       marketPhase: us?.marketPhase ?? 'data-unavailable',
       capitalPlan: us?.capitalPlan || buildCapitalPlan(capitalSettings),
+      coverage: us?.coverage ?? null,
+      rejectionSummary: us?.rejectionSummary ?? [],
     },
   };
 }

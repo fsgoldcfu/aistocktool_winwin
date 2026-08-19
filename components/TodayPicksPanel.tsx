@@ -15,9 +15,35 @@ type TodayPick = {
   category?: string;
 };
 
+type ScanCoverage = {
+  requested: number;
+  ready: number;
+  unavailable: number;
+  historyNetwork: number;
+  historyFreshCache: number;
+  historyStaleCache: number;
+  historyCooldownOrBudget: number;
+  windowRequestsUsed: number;
+  windowRequestBudget: number;
+  cooldownRemainingMs: number;
+};
+
+type RejectionSummaryItem = { code: string; label: string; count: number };
+
+type TodayPicksData = {
+  market?: string;
+  title?: string;
+  notice?: string | null;
+  recommendations?: TodayPick[];
+  scanner?: {
+    coverage?: ScanCoverage | null;
+    rejectionSummary?: RejectionSummaryItem[];
+  };
+};
+
 export function TodayPicksPanel({ capitalSettings }: { capitalSettings: UserCapitalSettings }) {
   const [loading, setLoading] = useState(false);
-  const [data, setData] = useState<{ market?: string; title?: string; notice?: string | null; recommendations?: TodayPick[] } | null>(null);
+  const [data, setData] = useState<TodayPicksData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
@@ -36,6 +62,9 @@ export function TodayPicksPanel({ capitalSettings }: { capitalSettings: UserCapi
   }
 
   const picks = data?.recommendations || [];
+  const coverage = data?.scanner?.coverage;
+  const rejectionSummary = data?.scanner?.rejectionSummary || [];
+  const cooldownMinutes = coverage?.cooldownRemainingMs ? Math.ceil(coverage.cooldownRemainingMs / 60_000) : 0;
   return (
     <section className="mb-6 rounded-2xl border border-amber-400/25 bg-gradient-to-br from-amber-500/10 to-[#0d1224] p-5">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
@@ -54,7 +83,13 @@ export function TodayPicksPanel({ capitalSettings }: { capitalSettings: UserCapi
 
       {error && <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
       {data && <p className="mb-3 text-sm text-slate-300">{data.title}。{data.notice || '資料已按現時段更新。'}</p>}
+      {coverage && <div className="mb-3 rounded-xl border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-slate-300">
+        <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-semibold text-sky-200">美股資料覆蓋率</span><span>{coverage.ready}/{coverage.requested} 隻可完成分析</span></div>
+        <p className="mt-1 text-slate-400">日線：本輪新取 {coverage.historyNetwork}、15 分鐘快取 {coverage.historyFreshCache}、舊快取 fallback {coverage.historyStaleCache}、限流／預算暫停 {coverage.historyCooldownOrBudget}。本 15 分鐘窗口已使用 {coverage.windowRequestsUsed}/{coverage.windowRequestBudget} 個歷史資料請求。</p>
+        {cooldownMinutes > 0 && <p className="mt-1 text-amber-300">資料供應商正處於 cooldown，約 {cooldownMinutes} 分鐘後才會再嘗試未取得資料的股票。</p>}
+      </div>}
       {data && picks.length === 0 && <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-slate-400"><Clock className="w-4 h-4" />暫時沒有合格訊號；系統不會為湊數而顯示交易建議。</div>}
+      {rejectionSummary.length > 0 && <div className="mb-3 rounded-xl border border-white/10 bg-white/5 p-3"><p className="mb-2 text-xs font-semibold text-slate-200">本輪淘汰統計（每隻股票只按最後未通過規則計一次）</p><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{rejectionSummary.map((item) => <div key={item.code} className="flex items-center justify-between rounded-lg bg-slate-950/40 px-2.5 py-2 text-xs"><span className="text-slate-400">{item.label}</span><span className="font-semibold text-white">{item.count}</span></div>)}</div></div>}
       <div className="grid gap-3 md:grid-cols-2">
         {picks.map((pick) => (
           <article key={`${pick.symbol}-${pick.category || 'stock'}`} className="rounded-xl border border-emerald-400/20 bg-emerald-500/5 p-4">

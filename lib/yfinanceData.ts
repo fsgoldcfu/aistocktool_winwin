@@ -6,6 +6,18 @@ const cache = new NodeCache({ stdTTL: 900 });
 
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY || '';
 const TWELVE_DATA_KEY = process.env.TWELVE_DATA_API_KEY || process.env.TWELVE_DATA_KEY || '';
+const HISTORY_CACHE_TTL_SECONDS = 15 * 60;
+const HISTORY_STALE_TTL_SECONDS = 6 * 60 * 60;
+const HISTORY_WINDOW_MS = 15 * 60 * 1000;
+const TWELVE_DATA_MIN_INTERVAL_MS = Math.max(0, Number(process.env.TWELVE_DATA_MIN_INTERVAL_MS ?? 8_000));
+const TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW = Math.max(1, Number(process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW ?? 8));
+const TWELVE_DATA_429_COOLDOWN_MS = Math.max(60_000, Number(process.env.TWELVE_DATA_429_COOLDOWN_MS ?? HISTORY_WINDOW_MS));
+
+let nextTwelveDataRequestAt = 0;
+let twelveDataCooldownUntil = 0;
+let historyWindowStartedAt = Date.now();
+let historyRequestsInWindow = 0;
+const historyInFlight = new Map<string, Promise<HistoricalDataResult>>();
 
 export interface QuoteData {
   symbol: string;
@@ -27,6 +39,15 @@ export interface CandleData {
   low: number;
   close: number;
   volume: number;
+}
+
+export type HistoricalDataSource = 'fresh-cache' | 'network' | 'stale-cache' | 'cooldown' | 'budget-exhausted' | 'error';
+
+export interface HistoricalDataResult {
+  candles: CandleData[];
+  source: HistoricalDataSource;
+  error?: string;
+  cachedAt?: number;
 }
 
 export interface IndicatorData {
@@ -110,33 +131,108 @@ async function fetchQuote(symbol: string): Promise<QuoteData> {
   return quote;
 }
 
-async function fetchHistoricalData(symbol: string, period: string = '3mo'): Promise<CandleData[]> {
-  const cacheKey = `history_${symbol}_${period}`;
-  const cached = cache.get(cacheKey) as CandleData[] | undefined;
-  if (cached) return cached;
+function historyCacheKey(symbol: string, period: string) {
+  return `history_${symbol.toUpperCase()}_${period}`;
+}
 
-  const apiKey = requiredKey(TWELVE_DATA_KEY, 'TWELVE_DATA_API_KEY');
-  const outputsize = period === '1mo' ? 22 : period === '3mo' ? 66 : period === '6mo' ? 132 : 260;
-  const params = new URLSearchParams({
-    symbol,
-    interval: '1day',
-    outputsize: String(outputsize),
-    order: 'asc',
-    adjust: 'splits',
-    apikey: apiKey,
-  });
-  const response = await fetch(`https://api.twelvedata.com/time_series?${params.toString()}`, {
-    cache: 'no-store',
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error(`Twelve Data HTTP ${response.status}`);
-  const data = await response.json();
-  if (data.status === 'error' || data.code || !data.values) {
-    throw new Error(`Twelve Data 日線錯誤：${data.message || 'unknown'}`);
+function readStaleHistory(symbol: string, period: string): CandleData[] | undefined {
+  return cache.get(`history_stale_${symbol.toUpperCase()}_${period}`) as CandleData[] | undefined;
+}
+
+function resetHistoryWindowIfNeeded(now = Date.now()) {
+  if (now - historyWindowStartedAt >= HISTORY_WINDOW_MS) {
+    historyWindowStartedAt = now;
+    historyRequestsInWindow = 0;
   }
-  const candles = normalizeCandles(data.values);
-  cache.set(cacheKey, candles, 900);
-  return candles;
+}
+
+async function scheduleTwelveDataHistoryRequest() {
+  const now = Date.now();
+  const scheduledAt = Math.max(now, nextTwelveDataRequestAt);
+  nextTwelveDataRequestAt = scheduledAt + TWELVE_DATA_MIN_INTERVAL_MS;
+  if (scheduledAt > now) await sleep(scheduledAt - now);
+}
+
+/**
+ * 只讓未快取的日線請求進入序列化佇列；同一 symbol/period 的 in-flight request 會共用，
+ * 而 429 或預算用盡時盡量退回最後一份有效日線，避免 scanner 以不完整新資料作出推薦。
+ */
+async function fetchHistoricalDataWithMeta(symbol: string, period: string = '3mo'): Promise<HistoricalDataResult> {
+  const normalizedSymbol = symbol.toUpperCase();
+  const cacheKey = historyCacheKey(normalizedSymbol, period);
+  const cached = cache.get(cacheKey) as CandleData[] | undefined;
+  if (cached) return { candles: cached, source: 'fresh-cache' };
+
+  const inFlight = historyInFlight.get(cacheKey);
+  if (inFlight) return inFlight;
+
+  const request = (async (): Promise<HistoricalDataResult> => {
+    const stale = readStaleHistory(normalizedSymbol, period);
+    const now = Date.now();
+    resetHistoryWindowIfNeeded(now);
+    if (now < twelveDataCooldownUntil) {
+      return stale
+        ? { candles: stale, source: 'stale-cache', error: 'Twelve Data 429 cooldown active; using last valid daily history.' }
+        : { candles: [], source: 'cooldown', error: 'Twelve Data 429 cooldown active.' };
+    }
+    if (historyRequestsInWindow >= TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW) {
+      return stale
+        ? { candles: stale, source: 'stale-cache', error: 'Twelve Data history request budget reached; using last valid daily history.' }
+        : { candles: [], source: 'budget-exhausted', error: 'Twelve Data history request budget reached for this 15-minute window.' };
+    }
+
+    try {
+      const apiKey = requiredKey(TWELVE_DATA_KEY, 'TWELVE_DATA_API_KEY');
+      historyRequestsInWindow += 1;
+      await scheduleTwelveDataHistoryRequest();
+      const outputsize = period === '1mo' ? 22 : period === '3mo' ? 66 : period === '6mo' ? 132 : 260;
+      const params = new URLSearchParams({
+        symbol: normalizedSymbol,
+        interval: '1day',
+        outputsize: String(outputsize),
+        order: 'asc',
+        adjust: 'splits',
+        apikey: apiKey,
+      });
+      const response = await fetch(`https://api.twelvedata.com/time_series?${params.toString()}`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (response.status === 429) {
+        twelveDataCooldownUntil = Date.now() + TWELVE_DATA_429_COOLDOWN_MS;
+        return stale
+          ? { candles: stale, source: 'stale-cache', error: 'Twelve Data HTTP 429; using last valid daily history.' }
+          : { candles: [], source: 'cooldown', error: 'Twelve Data HTTP 429; cooldown started.' };
+      }
+      if (!response.ok) throw new Error(`Twelve Data HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.status === 'error' || data.code || !data.values) {
+        throw new Error(`Twelve Data 日線錯誤：${data.message || 'unknown'}`);
+      }
+      const candles = normalizeCandles(data.values);
+      cache.set(cacheKey, candles, HISTORY_CACHE_TTL_SECONDS);
+      cache.set(`history_stale_${normalizedSymbol}_${period}`, candles, HISTORY_STALE_TTL_SECONDS);
+      return { candles, source: 'network' };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown historical data error';
+      return stale
+        ? { candles: stale, source: 'stale-cache', error: message }
+        : { candles: [], source: 'error', error: message };
+    }
+  })();
+
+  historyInFlight.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    historyInFlight.delete(cacheKey);
+  }
+}
+
+async function fetchHistoricalData(symbol: string, period: string = '3mo'): Promise<CandleData[]> {
+  const result = await fetchHistoricalDataWithMeta(symbol, period);
+  if (!result.candles.length) throw new Error(result.error || `Twelve Data 日線資料不可用：${symbol}`);
+  return result.candles;
 }
 
 function emaSeries(values: number[], period: number): (number | null)[] {
@@ -210,4 +306,22 @@ function calculateIndicators(candles: CandleData[]): IndicatorData {
   };
 }
 
-export const yfinanceData = { fetchQuote, fetchHistoricalData, calculateIndicators, sleep };
+export function getHistoricalCacheStatus(symbol: string, period: string = '3mo') {
+  const normalizedSymbol = symbol.toUpperCase();
+  return {
+    fresh: Boolean(cache.get(historyCacheKey(normalizedSymbol, period))),
+    stale: Boolean(readStaleHistory(normalizedSymbol, period)),
+  };
+}
+
+export function getTwelveDataHistoryHealth() {
+  resetHistoryWindowIfNeeded();
+  return {
+    windowRequestsUsed: historyRequestsInWindow,
+    windowRequestBudget: TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW,
+    cooldownRemainingMs: Math.max(0, twelveDataCooldownUntil - Date.now()),
+    cacheTtlSeconds: HISTORY_CACHE_TTL_SECONDS,
+  };
+}
+
+export const yfinanceData = { fetchQuote, fetchHistoricalData, fetchHistoricalDataWithMeta, calculateIndicators, sleep, getHistoricalCacheStatus, getTwelveDataHistoryHealth };

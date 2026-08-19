@@ -16,7 +16,7 @@
  */
 
 // ==================== 真實數據源（Finnhub API） ====================
-import { yfinanceData as financeAPI } from "./yfinanceData";
+import { yfinanceData as financeAPI, type HistoricalDataSource } from "./yfinanceData";
 import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateFutuUsStockNetProfit } from './shortTermRisk';
 import { assessCatalyst, type CatalystAssessment, type EarningsEvidence } from './catalystAnalysis';
 import { buildCapitalPlan, type CapitalPlan, type CapitalSettingsInput } from './capitalSettings';
@@ -240,6 +240,38 @@ export interface V3_7Recommendation {
   tradeabilityReason: string;
 }
 
+export type RejectionCode =
+  | 'data_unavailable'
+  | 'catalyst_risk'
+  | 'late_session'
+  | 'relative_strength'
+  | 'overheated'
+  | 'risk_reward_or_stop'
+  | 'profit_structure'
+  | 'net_profit'
+  | 'confidence'
+  | 'tradeability'
+  | 'other';
+
+export interface RejectionSummaryItem {
+  code: RejectionCode;
+  label: string;
+  count: number;
+}
+
+export interface ScanCoverage {
+  requested: number;
+  ready: number;
+  unavailable: number;
+  historyNetwork: number;
+  historyFreshCache: number;
+  historyStaleCache: number;
+  historyCooldownOrBudget: number;
+  windowRequestsUsed: number;
+  windowRequestBudget: number;
+  cooldownRemainingMs: number;
+}
+
 export interface ScanResult {
   recommendations: V3_7Recommendation[];
   scanTime: string;
@@ -257,6 +289,8 @@ export interface ScanResult {
   qualifiedCandidates: number;
   capitalPlan?: CapitalPlan;
   marketClosedNotice?: string;
+  coverage?: ScanCoverage;
+  rejectionSummary?: RejectionSummaryItem[];
 }
 
 // ============================================================
@@ -549,7 +583,13 @@ function calculateMinerviniScore(
 /**
  * Module 2: Stage 3 真實新聞 — 用 Finnhub /company-news endpoint
  */
+const newsCache = new Map<string, { expiresAt: number; items: NewsItem[] }>();
+const NEWS_CACHE_TTL_MS = 15 * 60 * 1000;
+
 async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
+  const normalizedSymbol = symbol.toUpperCase();
+  const cached = newsCache.get(normalizedSymbol);
+  if (cached && cached.expiresAt > Date.now()) return cached.items;
   try {
     const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "";
     const today = new Date();
@@ -568,14 +608,19 @@ async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
     }
 
     const data = await response.json();
-    if (!Array.isArray(data) || data.length === 0) return [];
+    if (!Array.isArray(data) || data.length === 0) {
+      newsCache.set(normalizedSymbol, { items: [], expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
+      return [];
+    }
 
-    return data.slice(0, 8).map((item: any) => ({
+    const items = data.slice(0, 8).map((item: any) => ({
       title: item.headline || "",
       url: item.url || "",
       datetime: Number(item.datetime) || undefined,
       source: item.source || undefined,
     }));
+    newsCache.set(normalizedSymbol, { items, expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
+    return items;
 
   } catch (error) {
     console.error(`[News] Error fetching news for ${symbol}:`, error);
@@ -770,18 +815,29 @@ interface StockData {
   catalyst: CatalystAssessment;
   volumeRatio: number;
   volumeSpike: boolean;
+  historicalSource: HistoricalDataSource;
+  historicalWarning?: string;
 }
 
-async function analyzeStock(symbol: string): Promise<StockData | null> {
+interface StockAnalysisResult {
+  data: StockData | null;
+  dataIssue?: string;
+  historicalSource?: HistoricalDataSource;
+}
+
+async function analyzeStock(symbol: string): Promise<StockAnalysisResult> {
   try {
-    const quote = await yfinanceData.fetchQuote(symbol);
-    if (!quote || quote.price <= 0) {
-      return null;
+    // 先確認日線是否可用；當 Twelve Data 預算／cooldown 阻擋新股票時，
+    // 不再額外對該股票發送 Finnhub quote 或 news 請求。
+    const history = await financeAPI.fetchHistoricalDataWithMeta(symbol, '3mo');
+    const candles = history.candles;
+    if (candles.length < 20) {
+      return { data: null, dataIssue: `history_${history.source}`, historicalSource: history.source };
     }
 
-    const candles = await yfinanceData.fetchHistoricalData(symbol, "3mo");
-    if (candles.length < 20) {
-      return null;
+    const quote = await yfinanceData.fetchQuote(symbol);
+    if (!quote || quote.price <= 0) {
+      return { data: null, dataIssue: 'quote_unavailable', historicalSource: history.source };
     }
     
     const indicators = yfinanceData.calculateIndicators(candles);
@@ -795,18 +851,62 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
     const volumeSpike = volumeRatio > 1.3; // +30% spike
 
     return {
-      quote,
-      indicators,
-      candles,
-      news,
-      catalyst,
-      volumeRatio,
-      volumeSpike,
+      data: {
+        quote,
+        indicators,
+        candles,
+        news,
+        catalyst,
+        volumeRatio,
+        volumeSpike,
+        historicalSource: history.source,
+        historicalWarning: history.error,
+      },
+      historicalSource: history.source,
     };
   } catch (error) {
     console.error(`Error analyzing ${symbol}:`, error);
-    return null;
+    return { data: null, dataIssue: 'unexpected_error' };
   }
+}
+
+const REJECTION_LABELS: Record<RejectionCode, string> = {
+  data_unavailable: '資料不足／供應商限流',
+  catalyst_risk: '業績或事件風險',
+  late_session: '尾市動能不足',
+  relative_strength: '相對強度不足或非上升',
+  overheated: '當日升幅過熱',
+  risk_reward_or_stop: '止蝕或至少 1.5R 結構不合格',
+  profit_structure: '目標價／最小 tick／倉位結構不可行',
+  net_profit: '成本後淨盈利未達 HK$500',
+  confidence: '策略確認分數不足',
+  tradeability: 'Tradeability Score 未達門檻',
+  other: '其他規則未通過',
+};
+
+function classifyRejection(reason: string): RejectionCode {
+  if (/No data available|quote_unavailable|history_|資料不足|限流|cooldown/i.test(reason)) return 'data_unavailable';
+  if (/事件風險|業績|catalyst/i.test(reason)) return 'catalyst_risk';
+  if (/Late Session/i.test(reason)) return 'late_session';
+  if (/Relative Strength/i.test(reason)) return 'relative_strength';
+  if (/Overheated/i.test(reason)) return 'overheated';
+  if (/成本後淨盈利/i.test(reason)) return 'net_profit';
+  if (/Profit Feasibility|有效價格跳動|資金不足/i.test(reason)) return 'profit_structure';
+  if (/Risk Plan|至少 .*R|回報風險|止蝕/i.test(reason)) return 'risk_reward_or_stop';
+  if (/Confidence/i.test(reason)) return 'confidence';
+  if (/Tradeability Score/i.test(reason)) return 'tradeability';
+  return 'other';
+}
+
+function buildRejectionSummary(rejectedBySymbol: Map<string, string>): RejectionSummaryItem[] {
+  const counts = new Map<RejectionCode, number>();
+  for (const reason of Array.from(rejectedBySymbol.values())) {
+    const code = classifyRejection(reason);
+    counts.set(code, (counts.get(code) || 0) + 1);
+  }
+  return (Object.keys(REJECTION_LABELS) as RejectionCode[])
+    .map((code) => ({ code, label: REJECTION_LABELS[code], count: counts.get(code) || 0 }))
+    .filter((item) => item.count > 0);
 }
 
 function buildRecommendation(
@@ -1143,22 +1243,44 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
     console.log(`[US V3.7] ⚠️ 大市跌市模式啟動（納指${(indexChangePercent * 100).toFixed(2)}% ≤ ${(CONFIG.downMarketThreshold * 100).toFixed(2)}%），優先推介逆市抗跌股`);
   }
 
-  // Step 1: Fetch all stock data in parallel (batched to avoid rate limiting)
+  // Step 1: 每隻股票的日線請求由 yfinanceData 內的 15 分鐘共用 cache、序列化佇列、
+  // 請求預算及 429 cooldown 管理；這裡保留逐一分析，避免新聞／日線資料同時爆發請求。
   const stockData = new Map<string, StockData | null>();
-  const THROTTLE_DELAY_MS = 1800; // 每隻股票之間延遲：而家多咗新聞 API 請求，加長節流避免 Rate Limit
+  const dataIssues = new Map<string, string>();
+  const historicalSources = new Map<string, HistoricalDataSource>();
 
-  for (let i = 0; i < US_STOCK_UNIVERSE.length; i++) {
-    const symbol = US_STOCK_UNIVERSE[i];
-    const result = await analyzeStock(symbol);
-    stockData.set(symbol, result);
+  const scanOrder = [...US_STOCK_UNIVERSE].sort((left, right) => {
+    const leftStatus = financeAPI.getHistoricalCacheStatus(left, '3mo');
+    const rightStatus = financeAPI.getHistoricalCacheStatus(right, '3mo');
+    // 未曾取得日線的股票優先；其次是已有 stale fallback 但無 fresh cache 的股票。
+    const leftRank = leftStatus.fresh ? 2 : leftStatus.stale ? 1 : 0;
+    const rightRank = rightStatus.fresh ? 2 : rightStatus.stale ? 1 : 0;
+    return leftRank - rightRank;
+  });
 
-    // 節流：每次請求之間加延遲，避開 Finnhub 免費版 60次/分鐘限制
-    if (i < US_STOCK_UNIVERSE.length - 1) {
-      await sleep(THROTTLE_DELAY_MS);
-    }
+  for (const symbol of scanOrder) {
+    const outcome = await analyzeStock(symbol);
+    stockData.set(symbol, outcome.data);
+    if (outcome.dataIssue) dataIssues.set(symbol, outcome.dataIssue);
+    if (outcome.historicalSource) historicalSources.set(symbol, outcome.historicalSource);
   }
-  
-  console.log(`[US V3.7] 已獲取 ${stockData.size} 隻美股數據`);
+
+  const dataReadyCount = Array.from(stockData.values()).filter((data): data is StockData => data != null).length;
+  const historySourceCount = (source: HistoricalDataSource) => Array.from(historicalSources.values()).filter((value) => value === source).length;
+  const providerHealth = financeAPI.getTwelveDataHistoryHealth();
+  const coverage: ScanCoverage = {
+    requested: US_STOCK_UNIVERSE.length,
+    ready: dataReadyCount,
+    unavailable: US_STOCK_UNIVERSE.length - dataReadyCount,
+    historyNetwork: historySourceCount('network'),
+    historyFreshCache: historySourceCount('fresh-cache'),
+    historyStaleCache: historySourceCount('stale-cache'),
+    historyCooldownOrBudget: historySourceCount('cooldown') + historySourceCount('budget-exhausted'),
+    windowRequestsUsed: providerHealth.windowRequestsUsed,
+    windowRequestBudget: providerHealth.windowRequestBudget,
+    cooldownRemainingMs: providerHealth.cooldownRemainingMs,
+  };
+  console.log(`[US V3.7] 已獲取 ${coverage.ready}/${coverage.requested} 隻美股數據；日線 fresh=${coverage.historyNetwork}、cache=${coverage.historyFreshCache}、stale=${coverage.historyStaleCache}、限流=${coverage.historyCooldownOrBudget}`);
   
   // 檢查板塊共振
   const resonanceStocks = new Set<string>();
@@ -1191,7 +1313,8 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
   }
 
   const recommendations: V3_7Recommendation[] = [];
-  const rejectedStocks: { symbol: string; reason: string }[] = [];
+  const rejectedStocks = new Map<string, string>();
+  const recordRejected = (symbol: string, reason: string) => rejectedStocks.set(symbol, reason);
 
   let stage1CandidatesCount = 0;
   let stage2CandidatesCount = 0;
@@ -1201,7 +1324,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
   for (const symbol of US_STOCK_UNIVERSE) {
     const data = stockData.get(symbol);
     if (!data) {
-      rejectedStocks.push({ symbol, reason: "No data available" });
+      recordRejected(symbol, dataIssues.get(symbol) || 'No data available');
       continue;
     }
 
@@ -1216,10 +1339,11 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
       recommendationResult = buildRecommendation(symbol, data, 3, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
+        rejectedStocks.delete(symbol);
         stage3CandidatesCount++;
         continue; // If news triggered, no need for other stages for this stock
       } else {
-        rejectedStocks.push({ symbol, reason: `Stage 3 News Failed: ${recommendationResult.debugReason}` });
+        recordRejected(symbol, `Stage 3 News Failed: ${recommendationResult.debugReason}`);
       }
     }
 
@@ -1230,10 +1354,11 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
       recommendationResult = buildRecommendation(symbol, data, 2, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
+        rejectedStocks.delete(symbol);
         stage2CandidatesCount++;
         continue;
       } else {
-        rejectedStocks.push({ symbol, reason: `Stage 2 Opening Momentum Failed: ${recommendationResult.debugReason}` });
+        recordRejected(symbol, `Stage 2 Opening Momentum Failed: ${recommendationResult.debugReason}`);
       }
     }
 
@@ -1245,10 +1370,11 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
       recommendationResult = buildRecommendation(symbol, data, 1, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, true, thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
+        rejectedStocks.delete(symbol);
         stage1CandidatesCount++;
         continue;
       } else {
-        rejectedStocks.push({ symbol, reason: `Stage 1 Resonance Failed: ${recommendationResult.debugReason}` });
+        recordRejected(symbol, `Stage 1 Resonance Failed: ${recommendationResult.debugReason}`);
       }
     }
 
@@ -1258,9 +1384,10 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
     recommendationResult = buildRecommendation(symbol, data, 4, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
     if (recommendationResult.recommendation) {
       recommendations.push(recommendationResult.recommendation);
+      rejectedStocks.delete(symbol);
       stage4CandidatesCount++;
     } else {
-      rejectedStocks.push({ symbol, reason: `Stage 4 Fallback Failed: ${recommendationResult.debugReason}` });
+      recordRejected(symbol, `Stage 4 Fallback Failed: ${recommendationResult.debugReason}`);
     }
   }
 
@@ -1287,9 +1414,12 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
   }
   console.log(`\n⚠️ 短炒風險規則：每個計劃最長持有 ${CONFIG.maxHoldingMinutes} 分鐘；跌穿 initial stop 或時間到即退出。`);
 
+  const rejectionSummary = buildRejectionSummary(rejectedStocks);
+  console.log(`[US V3.7] 淘汰統計：${rejectionSummary.map((item) => `${item.label}=${item.count}`).join('；') || '無'}`);
+
   if (DEBUG_MODE) {
     console.log("\n[DEBUG] Rejected Stocks Reasons:");
-    rejectedStocks.forEach(stock => console.log(`- ${stock.symbol}: ${stock.reason}`));
+    rejectedStocks.forEach((reason, symbol) => console.log(`- ${symbol}: ${reason}`));
   }
   
   const finalResult: ScanResult = {
@@ -1298,7 +1428,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
     hkTime: hkTimeInfo.hkTimeStr,
     marketPhase: hkTimeInfo.marketPhase,
     indexChangePercent,
-    totalScanned: stockData.size,
+    totalScanned: coverage.ready,
     stage1Candidates: stage1CandidatesCount,
     stage2Candidates: stage2CandidatesCount,
     stage3Candidates: stage3CandidatesCount,
@@ -1308,6 +1438,8 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
     tradeabilityThreshold: CONFIG.tradeabilityThreshold,
     qualifiedCandidates: recommendations.filter((recommendation) => recommendation.tradeabilityScore >= CONFIG.tradeabilityThreshold).length,
     capitalPlan,
+    coverage,
+    rejectionSummary,
   };
 
   // 存入 Cache，15分鐘內重複請求直接返回
