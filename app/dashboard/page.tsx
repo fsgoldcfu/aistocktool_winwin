@@ -4,36 +4,26 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { supabase, type StockSignal, type Profile } from '@/lib/supabase';
+import { TradeJournalPanel } from '@/components/TradeJournalPanel';
+import { TodayPicksPanel } from '@/components/TodayPicksPanel';
+import { CapitalSettingsPanel, DEFAULT_USER_CAPITAL_SETTINGS, loadUserCapitalSettings, capitalQuery, type UserCapitalSettings } from '@/components/CapitalSettingsPanel';
 import {
-  TrendingUp,
-  TrendingDown,
-  Eye,
-  LogOut,
-  Crown,
-  Zap,
-  Clock,
-  BarChart2,
-  RefreshCw,
-  Lock,
-  ChevronRight,
-  User,
-  AlertTriangle,
-  Star,
+  TrendingUp, TrendingDown, LogOut, Crown, Zap, Clock,
+  BarChart2, RefreshCw, Lock, ChevronRight, User,
+  AlertTriangle, Star, Gem, Target, Calendar, Activity,
 } from 'lucide-react';
 
 const SITE_NAME = process.env.NEXT_PUBLIC_SITE_NAME || '玄金操盤手';
 const MONTHLY_PRICE = process.env.NEXT_PUBLIC_MONTHLY_PRICE || '388';
 
+type Market = 'US' | 'HK';
+type Mode = 'shortterm' | 'midterm' | 'indices';
+
+// ==================== 短炒 Signal ====================
 const SIGNAL_TYPE_LABELS: Record<string, { label: string; color: string; bg: string }> = {
   buy: { label: '買入', color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20' },
   sell: { label: '沽出', color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/20' },
   watch: { label: '觀察', color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
-};
-
-const TIMEFRAME_LABELS: Record<string, string> = {
-  intraday: '當日',
-  '1-3days': '1-3日',
-  '1week': '一週',
 };
 
 const STATUS_LABELS: Record<string, { label: string; color: string }> = {
@@ -42,7 +32,6 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
   cancelled: { label: '已取消', color: 'text-red-400' },
 };
 
-// Extended StockSignal with stage information
 interface SignalWithStages extends StockSignal {
   stage1?: { passed: boolean; label: string; detail: string };
   stage2?: { passed: boolean; label: string; detail: string };
@@ -50,65 +39,252 @@ interface SignalWithStages extends StockSignal {
   stage4?: { passed: boolean; label: string; detail: string };
   isFallback?: boolean;
   isNearMiss?: boolean;
+  capitalAllocatedHKD?: number;
+  expectedProfitHKD?: number;
+  estimatedCostsHKD?: number;
+  estimatedNetProfitHKD?: number;
+  minimumNetProfitHKD?: number;
+  catalystStatus?: 'verified-positive' | 'neutral' | 'event-risk' | 'unavailable';
+  catalystSummary?: string;
+  catalystEvidence?: string[];
+  catalystHeadline?: string;
+  catalystUrl?: string;
+  upcomingEarningsDate?: string;
+  recommendationReasons?: string[];
+  isCounterTrend?: boolean;
 }
+
+// ==================== 中短線 Recommendation ====================
+interface MidtermRec {
+  id: string;
+  market: 'US' | 'HK';
+  stock_code: string;
+  stock_name: string;
+  current_price: number;
+  change_percent: number;
+
+  trigger_type: string;
+  trigger_label: string;
+  trigger_reason: string;
+
+  take_profit_a: number;
+  take_profit_a_percent: number;
+  take_profit_b: number;
+  take_profit_b_percent: number;
+  stop_loss: number;
+  stop_loss_percent: number;
+
+  suggested_capital_hkd: number;
+  expected_profit_a_hkd: number;
+  expected_profit_b_hkd: number;
+
+  rsi: number;
+  week_high_52: number;
+  week_low_52: number;
+  distance_from_52week_high: number;
+
+  earnings_days_until?: number;
+  earnings_beat_count?: number;
+
+  confidence: number;
+  holding_period: string;
+  sector: string;
+}
+
+const TRIGGER_COLORS: Record<string, { border: string; badge: string; text: string }> = {
+  EARNINGS_DIP: {
+    border: 'border-amber-400/40',
+    badge: 'bg-amber-500/20 text-amber-400',
+    text: 'text-amber-400',
+  },
+  STRONG_STOCK_PULLBACK: {
+    border: 'border-emerald-400/40',
+    badge: 'bg-emerald-500/20 text-emerald-400',
+    text: 'text-emerald-400',
+  },
+  SECTOR_BREAKOUT: {
+    border: 'border-blue-400/40',
+    badge: 'bg-blue-500/20 text-blue-400',
+    text: 'text-blue-400',
+  },
+};
+
+// ==================== 指數 / 槓桿ETF ====================
+interface IndexResult {
+  symbol: string;
+  name: string;
+  direction: 'long' | 'short';
+  latestClose: number;
+  latestDate: string;
+  signalClose: number;
+  analysisAsOf: string;
+  trend: 'strong' | 'neutral' | 'weak';
+  supportLevels: { avg: number; touches: number }[];
+  resistanceLevels: { avg: number; touches: number }[];
+  data: {
+    priceSource: 'twelve_data_price' | 'prior_close';
+    priceTimestamp: string;
+    lastCompletedDailyBar: string;
+    signalUsesCompletedDailyBar: true;
+  };
+  indicators: {
+    sma20: number | null;
+    sma50: number | null;
+    sma200: number | null;
+    atr14: number | null;
+    avgVolume20: number | null;
+    latestVolume: number;
+    volumeSpikeRatio: number | null;
+    rsi14: number | null;
+  };
+  strategyBacktest: {
+    inSample: { trades: number; winRate: number | null; avgR: number | null; maxDrawdownPct: number | null };
+    outOfSample: { trades: number; winRate: number | null; avgR: number | null; maxDrawdownPct: number | null };
+    validationNote: string;
+  };
+  recommendation: {
+    status: 'TRADEABLE' | 'WATCH' | 'NO_TRADE';
+    action: string;
+    nextBuyPrice: number | null;
+    nextSellPrice: number | null;
+    basis: string;
+    reasons: string[];
+    tradePlan: {
+      entry: number;
+      initialStop: number;
+      target1: number;
+      target2: number;
+      riskPerShare: number;
+      rewardRiskToT1: number;
+      maxHoldingDays: number;
+      entryRule: string;
+      invalidation: string;
+    } | null;
+  };
+  capitalPlan?: { capitalPerPositionHKD: number; dailyCapitalHKD: number };
+  capitalFeasibility?: { feasible: boolean; shares?: number; capitalAllocatedHKD?: number; estimatedNetProfitHKD?: number; estimatedCostsHKD?: number; minimumNetProfitHKD?: number; reason?: string } | null;
+}
+
+const TREND_LABELS: Record<string, { label: string; color: string }> = {
+  strong: { label: '強勢', color: 'text-emerald-400' },
+  neutral: { label: '中性', color: 'text-amber-400' },
+  weak: { label: '弱勢', color: 'text-red-400' },
+};
+
+// ==================== MAIN COMPONENT ====================
 
 export default function DashboardPage() {
   const router = useRouter();
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [signals, setSignals] = useState<SignalWithStages[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // 短炒 state
+  const [signals, setSignals] = useState<SignalWithStages[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [scanInfo, setScanInfo] = useState<{ usedSoftener: boolean; nearMissCount: number } | null>(null);
+  const [scanInfo, setScanInfo] = useState<{ usedSoftener: boolean; nearMissCount: number; tradeabilityThreshold?: number; qualifiedCandidates?: number } | null>(null);
+  const [marketClosedNotice, setMarketClosedNotice] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'active' | 'closed'>('active');
+  const [market, setMarket] = useState<Market>('US');
+  const [capitalSettings, setCapitalSettings] = useState<UserCapitalSettings>(DEFAULT_USER_CAPITAL_SETTINGS);
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  // 中短線 state
+  const [midtermRecs, setMidtermRecs] = useState<MidtermRec[]>([]);
+  const [midtermScanning, setMidtermScanning] = useState(false);
+  const [midtermError, setMidtermError] = useState<string | null>(null);
+  const [midtermMarket, setMidtermMarket] = useState<'ALL' | 'US' | 'HK'>('ALL');
+
+  // 指數/槓桿ETF state
+  const [indexResults, setIndexResults] = useState<IndexResult[]>([]);
+  const [indexScanning, setIndexScanning] = useState(false);
+  const [indexError, setIndexError] = useState<string | null>(null);
+  const [indexGeneratedAt, setIndexGeneratedAt] = useState<string | null>(null);
+
+  // 模式切換（短炒 vs 中短線 vs 指數）
+  const [mode, setMode] = useState<Mode>('shortterm');
+
+  useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
-  setLoading(true);
-  setProfile({ 
-    id: 'guest', 
-    email: 'guest@local', 
-    full_name: '訪客', 
-    subscription_status: 'active' 
-  } as any);
-  setSignals([]);
-  setLoading(false);
-};
+    setLoading(true);
+    setCapitalSettings(loadUserCapitalSettings());
+    setProfile({
+      id: 'guest', email: 'guest@local', full_name: '訪客',
+      subscription_status: 'active'
+    } as any);
+    setLoading(false);
+  };
 
-  const handleScan = async () => {
+  // ==================== 短炒掃描 ====================
+  const handleScan = async (targetMarket: Market = market) => {
     setScanning(true);
     setScanError(null);
     setScanInfo(null);
-
+    setMarketClosedNotice(null);
+    const endpoint = targetMarket === 'HK' ? '/api/scan-hk' : '/api/scan';
     try {
-      const response = await fetch('/api/scan', {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'linkage', riskLevel: 'medium' })
+        body: JSON.stringify({ mode: 'linkage', riskLevel: 'medium', capitalSettings })
       });
-
       const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Scan failed');
-      }
-
+      if (!response.ok) throw new Error(data.error || 'Scan failed');
       if (data.success && data.signals) {
         setSignals(data.signals);
-        setScanInfo({
-          usedSoftener: data.usedSoftener || false,
-          nearMissCount: data.nearMissCount || 0
-        });
+        setScanInfo({ usedSoftener: data.usedSoftener || false, nearMissCount: data.nearMissCount || 0, tradeabilityThreshold: data.tradeabilityThreshold, qualifiedCandidates: data.qualifiedCandidates });
+        if (data.marketClosedNotice) setMarketClosedNotice(data.marketClosedNotice);
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Scan failed';
-      setScanError(message);
-      console.error('Scan error:', message);
+      setScanError(err instanceof Error ? err.message : 'Scan failed');
     } finally {
       setScanning(false);
+    }
+  };
+
+  const handleMarketSwitch = (targetMarket: Market) => {
+    if (targetMarket === market) return;
+    setMarket(targetMarket);
+    setSignals([]);
+    setScanInfo(null);
+    setScanError(null);
+    setMarketClosedNotice(null);
+  };
+
+  // ==================== 中短線掃描 ====================
+  const handleMidtermScan = async () => {
+    setMidtermScanning(true);
+    setMidtermError(null);
+    try {
+      const response = await fetch('/api/scan-midterm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ market: midtermMarket, forceRefresh: false })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '掃描失敗');
+      if (data.success) setMidtermRecs(data.recommendations || []);
+    } catch (err) {
+      setMidtermError(err instanceof Error ? err.message : '掃描失敗');
+    } finally {
+      setMidtermScanning(false);
+    }
+  };
+
+  // ==================== 指數/槓桿ETF掃描 ====================
+  const handleIndexScan = async () => {
+    setIndexScanning(true);
+    setIndexError(null);
+    try {
+      const response = await fetch(`/api/index-scanner${capitalQuery(capitalSettings)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '掃描失敗');
+      setIndexResults(data.results || []);
+      setIndexGeneratedAt(data.generatedAt || null);
+    } catch (err) {
+      setIndexError(err instanceof Error ? err.message : '掃描失敗');
+    } finally {
+      setIndexScanning(false);
     }
   };
 
@@ -121,20 +297,19 @@ export default function DashboardPage() {
   const filteredSignals = signals.filter((s) =>
     activeTab === 'active' ? s.status === 'active' : s.status !== 'active'
   );
+  const displaySignals = isPremium ? filteredSignals :
+    [...filteredSignals.filter(s => !s.is_premium), ...filteredSignals.filter(s => s.is_premium)];
 
-  const freeSignals = filteredSignals.filter((s) => !s.is_premium);
-  const premiumSignals = filteredSignals.filter((s) => s.is_premium);
-  const displaySignals = isPremium ? filteredSignals : [...freeSignals, ...premiumSignals];
-
-  const winRate = signals.filter((s) => s.result_pct && s.result_pct > 0).length;
-  const closedCount = signals.filter((s) => s.status === 'closed').length;
+  const displayMidtermRecs = midtermMarket === 'ALL'
+    ? midtermRecs
+    : midtermRecs.filter(r => r.market === midtermMarket);
 
   if (loading) {
     return (
       <div className="min-h-screen bg-[#0a0e1a] flex items-center justify-center">
         <div className="text-center">
           <div className="w-12 h-12 border-2 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <p className="text-slate-400">載入訊號中...</p>
+          <p className="text-slate-400">載入中...</p>
         </div>
       </div>
     );
@@ -152,33 +327,21 @@ export default function DashboardPage() {
               </div>
               <span className="text-white font-bold">{SITE_NAME}</span>
             </div>
-
             <div className="flex items-center gap-3">
               {isPremium ? (
                 <span className="hidden sm:inline-flex items-center gap-1.5 bg-amber-400/10 border border-amber-400/30 text-amber-400 text-xs font-bold px-3 py-1.5 rounded-full">
-                  <Crown className="w-3.5 h-3.5" />
-                  高級會員
+                  <Crown className="w-3.5 h-3.5" />高級會員
                 </span>
               ) : (
-                <Link
-                  href="/register"
-                  className="hidden sm:inline-flex items-center gap-1.5 bg-amber-400 text-[#0a0e1a] text-xs font-bold px-3 py-1.5 rounded-full hover:bg-amber-300 transition-colors"
-                >
-                  <Crown className="w-3.5 h-3.5" />
-                  升級訂閱
+                <Link href="/register" className="hidden sm:inline-flex items-center gap-1.5 bg-amber-400 text-[#0a0e1a] text-xs font-bold px-3 py-1.5 rounded-full hover:bg-amber-300 transition-colors">
+                  <Crown className="w-3.5 h-3.5" />升級訂閱
                 </Link>
               )}
-
               <div className="flex items-center gap-2 text-slate-400">
                 <User className="w-4 h-4" />
                 <span className="text-sm hidden sm:block">{profile?.email}</span>
               </div>
-
-              <button
-                onClick={handleLogout}
-                className="text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-white/5"
-                title="登出"
-              >
+              <button onClick={handleLogout} className="text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-white/5">
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
@@ -187,301 +350,516 @@ export default function DashboardPage() {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Welcome & Stats */}
-        <div className="mb-8">
-          <h1 className="text-2xl font-black text-white mb-1">
-            你好，{profile?.full_name || '會員'} 👋
-          </h1>
-          <p className="text-slate-400 text-sm">以下是今日最新港股 AI 訊號</p>
+        {/* Welcome */}
+        <div className="mb-6">
+          <h1 className="text-2xl font-black text-white mb-1">你好，{profile?.full_name || '會員'} 👋</h1>
+          <p className="text-slate-400 text-sm">AI 股票分析系統</p>
         </div>
 
-        {/* Stats row */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-          <div className="bg-[#0d1224] border border-white/10 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-2">
-              <Zap className="w-4 h-4 text-amber-400" />
-              <span className="text-slate-400 text-xs">今日訊號</span>
-            </div>
-            <div className="text-2xl font-black text-white">{signals.filter((s) => s.status === 'active').length}</div>
-          </div>
-          <div className="bg-[#0d1224] border border-white/10 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-2">
-              <BarChart2 className="w-4 h-4 text-emerald-400" />
-              <span className="text-slate-400 text-xs">已完結</span>
-            </div>
-            <div className="text-2xl font-black text-white">{closedCount}</div>
-          </div>
-          <div className="bg-[#0d1224] border border-white/10 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingUp className="w-4 h-4 text-blue-400" />
-              <span className="text-slate-400 text-xs">獲利訊號</span>
-            </div>
-            <div className="text-2xl font-black text-emerald-400">{winRate}</div>
-          </div>
-          <div className="bg-[#0d1224] border border-white/10 rounded-2xl p-5">
-            <div className="flex items-center gap-2 mb-2">
-              <Crown className="w-4 h-4 text-amber-400" />
-              <span className="text-slate-400 text-xs">會員狀態</span>
-            </div>
-            <div className={`text-sm font-bold ${isPremium ? 'text-amber-400' : 'text-slate-300'}`}>
-              {isPremium ? '高級會員' : '免費會員'}
-            </div>
-          </div>
-        </div>
+        <CapitalSettingsPanel value={capitalSettings} onChange={setCapitalSettings} />
+        <TodayPicksPanel capitalSettings={capitalSettings} />
 
-        {/* Upgrade banner for free users */}
-        {!isPremium && (
-          <div className="bg-gradient-to-r from-amber-400/10 to-amber-600/5 border border-amber-400/20 rounded-2xl p-5 mb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <Crown className="w-5 h-5 text-amber-400" />
-                <span className="text-white font-bold">升級高級會員</span>
-              </div>
-              <p className="text-slate-400 text-sm">
-                解鎖全部每日 5-10 個訊號，附深度分析及即時 WhatsApp 推送
-              </p>
-            </div>
-            <div className="flex items-center gap-3 shrink-0">
-              <div className="text-right">
-                <div className="text-white font-black text-xl">HK${MONTHLY_PRICE}</div>
-                <div className="text-slate-400 text-xs">/月</div>
-              </div>
-              <button className="bg-amber-400 text-[#0a0e1a] px-5 py-2.5 rounded-xl font-bold text-sm hover:bg-amber-300 transition-colors flex items-center gap-1">
-                立即升級 <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Scan Error Alert */}
-        {scanError && (
-          <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
-            <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-            <div>
-              <p className="text-red-400 font-medium">掃描失敗</p>
-              <p className="text-slate-400 text-sm">{scanError}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Scan Info */}
-        {scanInfo && (scanInfo.usedSoftener || scanInfo.nearMissCount > 0) && (
-          <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
-            <Star className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-            <div>
-              <p className="text-amber-400 font-medium">掃描提示</p>
-              <p className="text-slate-400 text-sm">
-                {scanInfo.usedSoftener && '今日市場動能較弱，已啟用降維模式獲取更多推介。'}
-                {scanInfo.nearMissCount > 0 && ` 已加入 ${scanInfo.nearMissCount} 隻遺珠參考。`}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Tabs */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex gap-1 bg-white/5 border border-white/10 rounded-xl p-1">
-            <button
-              onClick={() => setActiveTab('active')}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                activeTab === 'active'
-                  ? 'bg-amber-400 text-[#0a0e1a]'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              進行中
-            </button>
-            <button
-              onClick={() => setActiveTab('closed')}
-              className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-                activeTab === 'closed'
-                  ? 'bg-amber-400 text-[#0a0e1a]'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              歷史記錄
-            </button>
-          </div>
-
+        {/* ===== 模式切換：短炒 / 中短線 / 指數 ===== */}
+        <div className="flex gap-1 bg-white/5 border border-white/10 rounded-xl p-1 mb-6 w-fit">
           <button
-            onClick={handleScan}
-            disabled={scanning}
-            className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg transition-all ${
-              scanning
-                ? 'bg-amber-400/20 text-amber-400 cursor-not-allowed'
-                : 'bg-amber-400 text-[#0a0e1a] hover:bg-amber-300'
-            }`}
+            onClick={() => setMode('shortterm')}
+            className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${mode === 'shortterm' ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}
           >
-            <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
-            <span className="hidden sm:inline">{scanning ? '掃描中...' : '刷新'}</span>
+            <Zap className="w-4 h-4" />
+            短炒推介
+          </button>
+          <button
+            onClick={() => setMode('midterm')}
+            className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${mode === 'midterm' ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}
+          >
+            <Target className="w-4 h-4" />
+            中短線選股
+          </button>
+          <button
+            onClick={() => setMode('indices')}
+            className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${mode === 'indices' ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}
+          >
+            <Activity className="w-4 h-4" />
+            指數/槓桿ETF
           </button>
         </div>
 
-        {/* Signals Grid */}
-        {displaySignals.length === 0 ? (
-          <div className="text-center py-16">
-            <Clock className="w-12 h-12 text-slate-600 mx-auto mb-4" />
-            <p className="text-slate-400">暫時沒有訊號，請按「刷新」開始掃描</p>
-          </div>
-        ) : (
-          <div className="grid gap-4 lg:grid-cols-2">
-            {displaySignals.map((signal) => {
-              const isLocked = !isPremium && signal.is_premium;
-              const typeInfo = SIGNAL_TYPE_LABELS[signal.signal_type] || SIGNAL_TYPE_LABELS.buy;
-              const upside = (((signal.target_price - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
-              const downside = (((signal.stop_loss - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
-              const statusInfo = STATUS_LABELS[signal.status];
+        {/* ==================== 短炒模式 ==================== */}
+        {mode === 'shortterm' && (
+          <>
+            {/* 市場切換 */}
+            <div className="flex items-center gap-1 bg-white/5 border border-white/10 rounded-xl p-1 mb-6 w-fit">
+              <button
+                onClick={() => handleMarketSwitch('US')}
+                className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${market === 'US' ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}
+              >🇺🇸 美股</button>
+              <button
+                onClick={() => handleMarketSwitch('HK')}
+                className={`px-5 py-2 rounded-lg text-sm font-bold transition-all ${market === 'HK' ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}
+              >🇭🇰 港股</button>
+            </div>
 
-              return (
-                <div
-                  key={signal.id}
-                  className={`bg-[#0d1224] border rounded-2xl overflow-hidden transition-all ${
-                    signal.isNearMiss
-                      ? 'border-amber-500/30'
-                      : signal.isFallback
-                      ? 'border-blue-500/30'
-                      : 'border-white/10 hover:border-white/20'
-                  } ${isLocked ? 'opacity-60' : ''}`}
-                >
-                  {/* Signal header */}
-                  <div className={`px-5 py-4 border-b border-white/5 flex items-center justify-between`}>
-                    <div className="flex items-center gap-3">
-                      <span className={`border text-xs font-bold px-2.5 py-1 rounded-full ${typeInfo.bg} ${typeInfo.color}`}>
-                        {typeInfo.label}
-                      </span>
-                      <div>
-                        <div className="text-white font-bold flex items-center gap-2">
-                          {signal.stock_name}
-                          {signal.isNearMiss && (
-                            <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">遺珠參考</span>
-                          )}
-                          {signal.isFallback && !signal.isNearMiss && (
-                            <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded">降維推介</span>
-                          )}
+            {/* Stats */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              {[
+                { icon: <Zap className="w-4 h-4 text-amber-400" />, label: '今日訊號', value: signals.filter(s => s.status === 'active').length, color: 'text-white' },
+                { icon: <BarChart2 className="w-4 h-4 text-emerald-400" />, label: '已完結', value: signals.filter(s => s.status === 'closed').length, color: 'text-white' },
+                { icon: <TrendingUp className="w-4 h-4 text-blue-400" />, label: '獲利訊號', value: signals.filter(s => s.result_pct && s.result_pct > 0).length, color: 'text-emerald-400' },
+                { icon: <Crown className="w-4 h-4 text-amber-400" />, label: '會員狀態', value: isPremium ? '高級會員' : '免費會員', color: isPremium ? 'text-amber-400' : 'text-slate-300' },
+              ].map((stat, i) => (
+                <div key={i} className="bg-[#0d1224] border border-white/10 rounded-2xl p-5">
+                  <div className="flex items-center gap-2 mb-2">{stat.icon}<span className="text-slate-400 text-xs">{stat.label}</span></div>
+                  <div className={`text-2xl font-black ${stat.color}`}>{stat.value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Alerts */}
+            {scanError && (
+              <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                <div><p className="text-red-400 font-medium">掃描失敗</p><p className="text-slate-400 text-sm">{scanError}</p></div>
+              </div>
+            )}
+            {marketClosedNotice && (
+              <div className="bg-slate-500/10 border border-slate-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+                <Clock className="w-5 h-5 text-slate-400 shrink-0 mt-0.5" />
+                <div><p className="text-slate-300 font-medium">市場休市</p><p className="text-slate-400 text-sm">{marketClosedNotice}</p></div>
+              </div>
+            )}
+            {scanInfo && (scanInfo.usedSoftener || scanInfo.nearMissCount > 0) && (
+              <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+                <Star className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-amber-400 font-medium">掃描提示</p>
+                  <p className="text-slate-400 text-sm">
+                    {scanInfo.usedSoftener && '今日市場動能較弱，已啟用降維模式。'}
+                    {scanInfo.nearMissCount > 0 && ` 已加入 ${scanInfo.nearMissCount} 隻遺珠參考。`}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Tabs + Refresh */}
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex gap-1 bg-white/5 border border-white/10 rounded-xl p-1">
+                {(['active', 'closed'] as const).map((tab) => (
+                  <button key={tab} onClick={() => setActiveTab(tab)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${activeTab === tab ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}>
+                    {tab === 'active' ? '進行中' : '歷史記錄'}
+                  </button>
+                ))}
+              </div>
+              <button onClick={() => handleScan()} disabled={scanning}
+                className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg transition-all ${scanning ? 'bg-amber-400/20 text-amber-400 cursor-not-allowed' : 'bg-amber-400 text-[#0a0e1a] hover:bg-amber-300'}`}>
+                <RefreshCw className={`w-4 h-4 ${scanning ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">{scanning ? '掃描中...' : `刷新${market === 'HK' ? '港股' : '美股'}`}</span>
+              </button>
+            </div>
+
+            {scanInfo?.tradeabilityThreshold != null && (
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 mb-6 text-slate-300 text-xs">
+                今日 Tradeability Score 門檻：<span className="text-blue-300 font-bold">{scanInfo.tradeabilityThreshold}</span>；合格候選：<span className="text-blue-300 font-bold">{scanInfo.qualifiedCandidates ?? 0}</span> 隻。系統最多顯示 5 隻，未達門檻時可以少於 5 隻或零隻。
+              </div>
+            )}
+
+            {/* Signals Grid */}
+            {displaySignals.length === 0 ? (
+              <div className="text-center py-16">
+                <Clock className="w-12 h-12 text-slate-600 mx-auto mb-4" />
+                <p className="text-slate-400">{marketClosedNotice || `暫時沒有合格訊號；系統不會為湊數而顯示交易建議。`}</p>
+              </div>
+            ) : (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {displaySignals.map((signal) => {
+                  const isLocked = !isPremium && signal.is_premium;
+                  const typeInfo = SIGNAL_TYPE_LABELS[signal.signal_type] || SIGNAL_TYPE_LABELS.buy;
+                  const upside = (((signal.target_price - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
+                  const downside = (((signal.stop_loss - signal.entry_price) / signal.entry_price) * 100).toFixed(1);
+                  const statusInfo = STATUS_LABELS[signal.status];
+                  const hasCapitalInfo = typeof signal.capitalAllocatedHKD === 'number' && typeof signal.estimatedNetProfitHKD === 'number';
+
+                  return (
+                    <div key={signal.id} className={`bg-[#0d1224] border rounded-2xl overflow-hidden transition-all ${signal.isCounterTrend ? 'border-cyan-400/40' : signal.isNearMiss ? 'border-amber-500/30' : signal.isFallback ? 'border-blue-500/30' : 'border-white/10 hover:border-white/20'} ${isLocked ? 'opacity-60' : ''}`}>
+                      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className={`border text-xs font-bold px-2.5 py-1 rounded-full ${typeInfo.bg} ${typeInfo.color}`}>{typeInfo.label}</span>
+                          <div>
+                            <div className="text-white font-bold flex items-center gap-2">
+                              {signal.stock_name}
+                              {signal.isCounterTrend && <span className="text-xs bg-cyan-500/20 text-cyan-400 px-2 py-0.5 rounded flex items-center gap-1"><Gem className="w-3 h-3" />逆市抗跌</span>}
+                              {signal.isNearMiss && <span className="text-xs bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded">遺珠參考</span>}
+                            </div>
+                            <div className="text-slate-500 text-xs">{signal.stock_code}</div>
+                          </div>
                         </div>
-                        <div className="text-slate-500 text-xs">{signal.stock_code}</div>
+                        <span className={`text-xs font-medium ${statusInfo.color}`}>{statusInfo.label}</span>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {signal.is_premium && (
-                        <span className="bg-amber-400/10 border border-amber-400/20 text-amber-400 text-xs px-2 py-0.5 rounded-full flex items-center gap-1">
-                          <Crown className="w-3 h-3" />
-                          高級
-                        </span>
+                      {isLocked ? (
+                        <div className="px-5 py-8 flex flex-col items-center justify-center text-center">
+                          <Lock className="w-8 h-8 text-slate-600 mb-2" />
+                          <p className="text-slate-400 text-sm mb-3">此為高級會員專屬訊號</p>
+                          <button className="bg-amber-400 text-[#0a0e1a] px-4 py-2 rounded-lg text-xs font-bold">升級解鎖</button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="px-5 py-4 grid grid-cols-3 gap-3">
+                            <div><div className="text-slate-400 text-xs mb-1">入場價</div><div className="text-white font-bold text-lg">${signal.entry_price.toFixed(2)}</div></div>
+                            <div><div className="text-slate-400 text-xs mb-1">目標價</div><div className="text-emerald-400 font-bold text-lg">${signal.target_price.toFixed(2)}</div><div className="text-emerald-400 text-xs">+{upside}%</div></div>
+                            <div><div className="text-slate-400 text-xs mb-1">止蝕價</div><div className="text-red-400 font-bold text-lg">${signal.stop_loss.toFixed(2)}</div><div className="text-red-400 text-xs">{downside}%</div></div>
+                          </div>
+                          {hasCapitalInfo && (
+                            <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">配置參考</div><div className="text-white font-bold text-sm">HK${signal.capitalAllocatedHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+                              <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">結構目標成本後淨盈利</div><div className="text-emerald-400 font-bold text-sm">HK${signal.estimatedNetProfitHKD!.toLocaleString(undefined, { maximumFractionDigits: 0 })}</div></div>
+                            </div>
+                          )}
+                          {hasCapitalInfo && <p className="px-5 pb-3 text-[10px] leading-relaxed text-slate-500">已扣估計買入及賣出成本 HK${(signal.estimatedCostsHKD ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}；只在成本後目標至少 HK${(signal.minimumNetProfitHKD ?? 500).toLocaleString()} 時推介。目標價並非保證成交。</p>}
+                          {typeof signal.riskRewardRatio === 'number' && (
+                            <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">回報／風險</div><div className="text-amber-400 font-bold text-sm">{signal.riskRewardRatio.toFixed(2)}R</div></div>
+                              <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-400 text-xs mb-0.5">時間退出</div><div className="text-slate-200 font-bold text-sm">{signal.maxHoldingMinutes || '—'} 分鐘</div></div>
+                            </div>
+                          )}
+                          <div className="px-5 pb-4">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-slate-400 text-xs">可交易分數（非勝率）</span>
+                              <span className="text-amber-400 text-xs font-bold">{signal.tradeabilityScore ?? signal.confidence}</span>
+                            </div>
+                            <div className="h-1.5 bg-white/10 rounded-full">
+                              <div className="h-1.5 bg-gradient-to-r from-amber-400 to-amber-300 rounded-full" style={{ width: `${signal.tradeabilityScore ?? 0}%` }} />
+                            </div>
+                          </div>
+                          {signal.analysis && <div className="px-5 pb-2"><p className="text-slate-400 text-xs leading-relaxed line-clamp-3">{signal.analysis}</p></div>}
+                          {signal.entryRule && <div className="px-5 pb-2"><p className="text-slate-500 text-[11px] leading-relaxed">入場：{signal.entryRule}</p></div>}
+                          {signal.invalidation && <div className="px-5 pb-3"><p className="text-red-300/80 text-[11px] leading-relaxed">失效：{signal.invalidation}</p></div>}
+                          {signal.catalystSummary && (
+                            <div className={`mx-5 mb-3 rounded-xl border p-3 ${signal.catalystStatus === 'verified-positive' ? 'bg-emerald-500/10 border-emerald-500/20' : signal.catalystStatus === 'event-risk' ? 'bg-red-500/10 border-red-500/20' : 'bg-slate-500/10 border-slate-500/20'}`}>
+                              <p className="text-slate-300 text-xs font-medium mb-1">催化／事件資料</p>
+                              <p className="text-slate-400 text-[11px] leading-relaxed">{signal.catalystSummary}</p>
+                              {signal.catalystHeadline && <p className="text-slate-300 text-[11px] leading-relaxed mt-1">新聞：{signal.catalystHeadline}</p>}
+                              {signal.catalystUrl && <a href={signal.catalystUrl} target="_blank" rel="noreferrer" className="text-blue-300 text-[11px] hover:underline mt-1 inline-block">查看原始新聞</a>}
+                              {signal.upcomingEarningsDate && <p className="text-amber-300 text-[11px] mt-1">業績日：{signal.upcomingEarningsDate}</p>}
+                            </div>
+                          )}
+                          {signal.recommendationReasons && signal.recommendationReasons.length > 0 && (
+                            <div className="mx-5 mb-4 rounded-xl bg-white/5 border border-white/10 p-3">
+                              <p className="text-slate-300 text-xs font-medium mb-2">推介原因</p>
+                              <ul className="space-y-1 text-slate-400 text-[11px] leading-relaxed list-disc pl-4">
+                                {signal.recommendationReasons.map((reason, index) => <li key={`${signal.id}-reason-${index}`}>{reason}</li>)}
+                              </ul>
+                            </div>
+                          )}
+                          <div className="px-5 pb-4 flex items-center justify-between">
+                            <div className="flex items-center gap-1.5 text-slate-500 text-xs"><Clock className="w-3 h-3" />日內計劃</div>
+                            {signal.result_pct !== null && (
+                              <div className={`flex items-center gap-1 text-sm font-bold ${signal.result_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                {signal.result_pct >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+                                {signal.result_pct >= 0 ? '+' : ''}{signal.result_pct}%
+                              </div>
+                            )}
+                          </div>
+                        </>
                       )}
-                      <span className={`text-xs font-medium ${statusInfo.color}`}>{statusInfo.label}</span>
                     </div>
-                  </div>
+                  );
+                })}
+              </div>
+            )}
+            <TradeJournalPanel signals={signals} market={market} />
+          </>
+        )}
 
-                  {isLocked ? (
-                    <div className="px-5 py-8 flex flex-col items-center justify-center text-center">
-                      <Lock className="w-8 h-8 text-slate-600 mb-2" />
-                      <p className="text-slate-400 text-sm mb-3">此為高級會員專屬訊號</p>
-                      <button className="bg-amber-400 text-[#0a0e1a] px-4 py-2 rounded-lg text-xs font-bold hover:bg-amber-300 transition-colors">
-                        升級解鎖
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="px-5 py-4 grid grid-cols-3 gap-3">
+        {/* ==================== 中短線模式 ==================== */}
+        {mode === 'midterm' && (
+          <>
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+              <Target className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-amber-400 font-medium">中短線選股模式</p>
+                <p className="text-slate-400 text-sm">持倉目標 1-4 週，止盈分兩批（+10% 先出一半，+20% 出另一半），止損 -7%。建議最多同時持有 3 注。</p>
+              </div>
+            </div>
+
+            {/* 市場篩選 + 掃描按鈕 */}
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex gap-1 bg-white/5 border border-white/10 rounded-xl p-1">
+                {(['ALL', 'US', 'HK'] as const).map((m) => (
+                  <button key={m} onClick={() => setMidtermMarket(m)}
+                    className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${midtermMarket === m ? 'bg-amber-400 text-[#0a0e1a]' : 'text-slate-400 hover:text-white'}`}>
+                    {m === 'ALL' ? '全部' : m === 'US' ? '🇺🇸 美股' : '🇭🇰 港股'}
+                  </button>
+                ))}
+              </div>
+              <button onClick={handleMidtermScan} disabled={midtermScanning}
+                className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg transition-all ${midtermScanning ? 'bg-amber-400/20 text-amber-400 cursor-not-allowed' : 'bg-amber-400 text-[#0a0e1a] hover:bg-amber-300'}`}>
+                <RefreshCw className={`w-4 h-4 ${midtermScanning ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">{midtermScanning ? '掃描中...' : '掃描中短線機會'}</span>
+              </button>
+            </div>
+
+            {midtermError && (
+              <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                <div><p className="text-red-400 font-medium">掃描失敗</p><p className="text-slate-400 text-sm">{midtermError}</p></div>
+              </div>
+            )}
+
+            {displayMidtermRecs.length === 0 ? (
+              <div className="text-center py-16">
+                <Target className="w-12 h-12 text-slate-600 mx-auto mb-4" />
+                <p className="text-slate-400 mb-2">暫時未有中短線機會</p>
+                <p className="text-slate-500 text-sm">中短線系統只會喺出現強力催化劑時推介，唔係每日都有。你亦可以設定 Email 通知，有機會先通知你。</p>
+              </div>
+            ) : (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {displayMidtermRecs.map((rec) => {
+                  const colors = TRIGGER_COLORS[rec.trigger_type] || TRIGGER_COLORS.STRONG_STOCK_PULLBACK;
+                  return (
+                    <div key={rec.id} className={`bg-[#0d1224] border ${colors.border} rounded-2xl overflow-hidden`}>
+                      {/* Header */}
+                      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
                         <div>
-                          <div className="text-slate-400 text-xs mb-1">入場價</div>
-                          <div className="text-white font-bold text-lg">${signal.entry_price.toFixed(2)}</div>
+                          <div className="text-white font-bold flex items-center gap-2">
+                            {rec.stock_name}
+                            <span className={`text-xs px-2 py-0.5 rounded ${colors.badge}`}>{rec.trigger_label}</span>
+                            <span className="text-xs bg-white/10 text-slate-400 px-2 py-0.5 rounded">{rec.market === 'US' ? '🇺🇸' : '🇭🇰'}</span>
+                          </div>
+                          <div className="text-slate-500 text-xs mt-0.5">{rec.stock_code} · {rec.sector}</div>
                         </div>
-                        <div>
-                          <div className="text-slate-400 text-xs mb-1">目標價</div>
-                          <div className="text-emerald-400 font-bold text-lg">${signal.target_price.toFixed(2)}</div>
-                          <div className="text-emerald-400 text-xs">+{upside}%</div>
-                        </div>
-                        <div>
-                          <div className="text-slate-400 text-xs mb-1">止蝕價</div>
-                          <div className="text-red-400 font-bold text-lg">${signal.stop_loss.toFixed(2)}</div>
-                          <div className="text-red-400 text-xs">{downside}%</div>
+                        <div className="text-right">
+                          <div className={`text-xs font-medium ${rec.change_percent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {rec.change_percent >= 0 ? '+' : ''}{(rec.change_percent * 100).toFixed(2)}%
+                          </div>
+                          <div className="text-slate-500 text-xs">今日</div>
                         </div>
                       </div>
 
+                      {/* 觸發原因 */}
+                      <div className="px-5 py-3 bg-white/2 border-b border-white/5">
+                        <p className="text-slate-300 text-xs leading-relaxed">{rec.trigger_reason}</p>
+                      </div>
+
+                      {/* 入場 + 分批止盈 */}
+                      <div className="px-5 py-4 grid grid-cols-4 gap-2">
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">入場參考</div>
+                          <div className="text-white font-bold">{rec.market === 'HK' ? 'HK$' : '$'}{rec.current_price.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">止盈一 <span className="text-emerald-400">+{rec.take_profit_a_percent}%</span></div>
+                          <div className="text-emerald-400 font-bold">{rec.market === 'HK' ? 'HK$' : '$'}{rec.take_profit_a.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">止盈二 <span className="text-emerald-300">+{rec.take_profit_b_percent}%</span></div>
+                          <div className="text-emerald-300 font-bold">{rec.market === 'HK' ? 'HK$' : '$'}{rec.take_profit_b.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">止損 <span className="text-red-400">-{rec.stop_loss_percent}%</span></div>
+                          <div className="text-red-400 font-bold">{rec.market === 'HK' ? 'HK$' : '$'}{rec.stop_loss.toFixed(2)}</div>
+                        </div>
+                      </div>
+
+                      {/* 資金 + 預期利潤 */}
+                      <div className="px-5 pb-3 grid grid-cols-3 gap-2">
+                        <div className="bg-white/5 rounded-xl px-3 py-2">
+                          <div className="text-slate-400 text-xs mb-0.5">建議投入</div>
+                          <div className="text-white font-bold text-sm">HK${rec.suggested_capital_hkd.toLocaleString()}</div>
+                        </div>
+                        <div className="bg-white/5 rounded-xl px-3 py-2">
+                          <div className="text-slate-400 text-xs mb-0.5">止盈一利潤</div>
+                          <div className="text-emerald-400 font-bold text-sm">HK${Math.round(rec.expected_profit_a_hkd).toLocaleString()}</div>
+                        </div>
+                        <div className="bg-white/5 rounded-xl px-3 py-2">
+                          <div className="text-slate-400 text-xs mb-0.5">止盈二利潤</div>
+                          <div className="text-emerald-300 font-bold text-sm">HK${Math.round(rec.expected_profit_b_hkd).toLocaleString()}</div>
+                        </div>
+                      </div>
+
+                      {/* AI 信心 + 技術面 */}
                       <div className="px-5 pb-4">
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="text-slate-400 text-xs">AI 信心指數</span>
-                          <span className="text-amber-400 text-xs font-bold">{signal.confidence}%</span>
+                          <span className={`text-xs font-bold ${colors.text}`}>{rec.confidence}%</span>
                         </div>
-                        <div className="h-1.5 bg-white/10 rounded-full">
-                          <div
-                            className="h-1.5 bg-gradient-to-r from-amber-400 to-amber-300 rounded-full transition-all"
-                            style={{ width: `${signal.confidence}%` }}
-                          />
+                        <div className="h-1.5 bg-white/10 rounded-full mb-3">
+                          <div className="h-1.5 bg-gradient-to-r from-amber-400 to-amber-300 rounded-full" style={{ width: `${rec.confidence}%` }} />
                         </div>
-                      </div>
-
-                      {/* Four-stage details */}
-                      {(signal.stage1 || signal.stage2 || signal.stage3 || signal.stage4) && (
-                        <div className="px-5 pb-4">
-                          <div className="text-slate-400 text-xs mb-2">四階段篩選詳情</div>
-                          <div className="grid grid-cols-2 gap-2 text-xs">
-                            {signal.stage1 && (
-                              <div className="flex items-center gap-1.5">
-                                <span>{signal.stage1.passed ? '✅' : '❌'}</span>
-                                <span className="text-slate-500">📊 量能異動：</span>
-                                <span className={signal.stage1.passed ? 'text-emerald-400' : 'text-slate-500'}>
-                                  {signal.stage1.passed ? signal.stage1.detail : '未通過'}
-                                </span>
-                              </div>
-                            )}
-                            {signal.stage2 && (
-                              <div className="flex items-center gap-1.5">
-                                <span>{signal.stage2.passed ? '✅' : '❌'}</span>
-                                <span className="text-slate-500">📰 新聞催化：</span>
-                                <span className={signal.stage2.passed ? 'text-emerald-400' : 'text-slate-500'}>
-                                  {signal.stage2.passed ? signal.stage2.detail : '無'}
-                                </span>
-                              </div>
-                            )}
-                            {signal.stage3 && (
-                              <div className="flex items-center gap-1.5">
-                                <span>{signal.stage3.passed ? '✅' : '❌'}</span>
-                                <span className="text-slate-500">🌐 美股聯動：</span>
-                                <span className={signal.stage3.passed ? 'text-emerald-400' : 'text-slate-500'}>
-                                  {signal.stage3.passed ? signal.stage3.detail : '無'}
-                                </span>
-                              </div>
-                            )}
-                            {signal.stage4 && (
-                              <div className="flex items-center gap-1.5">
-                                <span>{signal.stage4.passed ? '✅' : '❌'}</span>
-                                <span className="text-slate-500">📈 技術共振：</span>
-                                <span className={signal.stage4.passed ? 'text-emerald-400' : 'text-slate-500'}>
-                                  {signal.stage4.passed ? signal.stage4.detail : '未達標'}
-                                </span>
-                              </div>
-                            )}
-                          </div>
+                        <div className="flex items-center gap-4 text-xs text-slate-500">
+                          <span>RSI {rec.rsi.toFixed(0)}</span>
+                          <span>距52週高 -{rec.distance_from_52week_high.toFixed(1)}%</span>
+                          {rec.earnings_days_until && <span className="text-amber-400 flex items-center gap-1"><Calendar className="w-3 h-3" />業績 {rec.earnings_days_until}日後</span>}
                         </div>
-                      )}
-
-                      {signal.analysis && (
-                        <div className="px-5 pb-4">
-                          <p className="text-slate-400 text-xs leading-relaxed line-clamp-3">{signal.analysis}</p>
-                        </div>
-                      )}
-
-                      <div className="px-5 pb-4 flex items-center justify-between">
-                        <div className="flex items-center gap-1.5 text-slate-500 text-xs">
+                        <div className="mt-2 text-slate-500 text-xs flex items-center gap-1">
                           <Clock className="w-3 h-3" />
-                          {TIMEFRAME_LABELS[signal.timeframe] || signal.timeframe}
+                          建議持倉：{rec.holding_period}
                         </div>
-                        {signal.result_pct !== null && (
-                          <div className={`flex items-center gap-1 text-sm font-bold ${signal.result_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {signal.result_pct >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
-                            {signal.result_pct >= 0 ? '+' : ''}{signal.result_pct}%
-                          </div>
-                        )}
                       </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ==================== 指數/槓桿ETF模式 ==================== */}
+        {mode === 'indices' && (
+          <>
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+              <Activity className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-amber-400 font-medium">指數 / 槓桿ETF 掃描</p>
+                <p className="text-slate-400 text-sm">
+                  以 TQQQ 已完成日線的均線、ATR、RSI、布林通道和確認支持／阻力作風險計劃分析。
+                  系統只會在趨勢、支持、反轉確認和風險回報同時成立時顯示交易計劃；否則顯示觀察或不交易。
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between mb-6">
+              <div className="text-slate-500 text-xs">
+                {indexGeneratedAt && `更新時間 ${new Date(indexGeneratedAt).toLocaleString('zh-HK')}`}
+              </div>
+              <button
+                onClick={handleIndexScan}
+                disabled={indexScanning}
+                className={`flex items-center gap-2 text-sm font-medium px-4 py-2 rounded-lg transition-all ${indexScanning ? 'bg-amber-400/20 text-amber-400 cursor-not-allowed' : 'bg-amber-400 text-[#0a0e1a] hover:bg-amber-300'}`}
+              >
+                <RefreshCw className={`w-4 h-4 ${indexScanning ? 'animate-spin' : ''}`} />
+                <span>{indexScanning ? '分析中...' : '刷新指數'}</span>
+              </button>
+            </div>
+
+            {indexError && (
+              <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                <div><p className="text-red-400 font-medium">掃描失敗</p><p className="text-slate-400 text-sm">{indexError}</p></div>
+              </div>
+            )}
+
+            {indexResults.length === 0 ? (
+              <div className="text-center py-16">
+                <Activity className="w-12 h-12 text-slate-600 mx-auto mb-4" />
+                <p className="text-slate-400">暫時沒有數據，請按「刷新指數」開始分析（首次約需30-40秒）</p>
+              </div>
+            ) : (
+              <div className="grid gap-4 lg:grid-cols-2">
+                {indexResults.map((r) => {
+                  const isLong = r.direction === 'long';
+                  const trendInfo = TREND_LABELS[r.trend];
+                  const support = r.supportLevels?.[0]?.avg;
+                  const resistance = r.resistanceLevels?.[0]?.avg;
+                  const buyPrice = r.recommendation?.nextBuyPrice;
+                  const sellPrice = r.recommendation?.nextSellPrice;
+                  const plan = r.recommendation?.tradePlan;
+                  const recommendationStatus = r.recommendation?.status || 'NO_TRADE';
+                  const statusStyle = recommendationStatus === 'TRADEABLE'
+                    ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                    : recommendationStatus === 'WATCH'
+                      ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+                      : 'text-slate-400 bg-slate-500/10 border-slate-500/20';
+                  const statusLabel = recommendationStatus === 'TRADEABLE'
+                    ? '可建立計劃'
+                    : recommendationStatus === 'WATCH'
+                      ? '等待確認'
+                      : '不交易';
+
+                  return (
+                    <div key={r.symbol} className={`bg-[#0d1224] border rounded-2xl overflow-hidden ${isLong ? 'border-emerald-400/30' : 'border-red-400/30'}`}>
+                      <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className={`border text-xs font-bold px-2.5 py-1 rounded-full ${isLong ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-red-400 bg-red-500/10 border-red-500/20'}`}>
+                            {isLong ? '做多策略' : '做空策略'}
+                          </span>
+                          <div>
+                            <div className="text-white font-bold">{r.symbol}</div>
+                            <div className="text-slate-500 text-xs">{r.name}</div>
+                          </div>
+                        </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className={`text-xs font-medium ${trendInfo.color}`}>{trendInfo.label}</span>
+                            <span className={`border text-[10px] font-bold px-2 py-0.5 rounded-full ${statusStyle}`}>{statusLabel}</span>
+                          </div>
+                      </div>
+
+                      <div className="px-5 py-4 grid grid-cols-3 gap-3">
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">現價</div>
+                          <div className="text-white font-bold text-lg">${r.latestClose.toFixed(2)}</div>
+                          <div className="text-slate-500 text-[10px] mt-1">{r.data?.priceSource === 'twelve_data_price' ? 'price endpoint' : `收市 ${r.data?.lastCompletedDailyBar || r.latestDate}`}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">觸發入場</div>
+                          <div className="text-white font-bold text-lg">{buyPrice != null ? buyPrice.toFixed(2) : '—'}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-400 text-xs mb-1">目標一</div>
+                          <div className={`font-bold text-lg ${isLong ? 'text-emerald-400' : 'text-red-400'}`}>
+                            {sellPrice != null ? sellPrice.toFixed(2) : '—'}
+                          </div>
+                        </div>
+                      </div>
+
+                      {plan ? (
+                        <div className="px-5 pb-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">止蝕／失效</div><div className="text-red-400 font-bold text-sm">${plan.initialStop.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">每股風險</div><div className="text-slate-200 font-bold text-sm">${plan.riskPerShare.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">目標二</div><div className="text-emerald-300 font-bold text-sm">${plan.target2.toFixed(2)}</div></div>
+                          <div className="bg-white/5 rounded-xl px-3 py-2"><div className="text-slate-500 text-[10px]">回報／風險</div><div className="text-amber-400 font-bold text-sm">{plan.rewardRiskToT1.toFixed(2)}R</div></div>
+                        </div>
+                      ) : (
+                        <div className="px-5 pb-3 text-xs text-slate-400">{r.recommendation?.reasons?.[0] || '目前未符合建立交易計劃的條件。'}</div>
+                      )}
+
+                      <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+                        <div className="bg-white/5 rounded-xl px-3 py-2">
+                          <div className="text-slate-400 text-xs mb-0.5">支持位</div>
+                          <div className="text-slate-200 font-bold text-sm">{support != null ? support.toFixed(2) : '—'}</div>
+                        </div>
+                        <div className="bg-white/5 rounded-xl px-3 py-2">
+                          <div className="text-slate-400 text-xs mb-0.5">阻力位</div>
+                          <div className="text-slate-200 font-bold text-sm">{resistance != null ? resistance.toFixed(2) : '—'}</div>
+                        </div>
+                      </div>
+
+                      {r.capitalFeasibility && (
+                        <div className={`mx-5 mb-3 rounded-xl border px-3 py-2 text-xs ${r.capitalFeasibility.feasible ? 'border-emerald-400/20 bg-emerald-500/5' : 'border-red-400/20 bg-red-500/5'}`}>
+                          <div className="flex justify-between"><span className="text-slate-400">按資金設定可買</span><span className={r.capitalFeasibility.feasible ? 'text-emerald-300' : 'text-red-300'}>{r.capitalFeasibility.shares ?? 0} 股</span></div>
+                          <div className="flex justify-between"><span className="text-slate-400">成本後估算</span><span className="text-white">HK${(r.capitalFeasibility.estimatedNetProfitHKD ?? 0).toFixed(0)} / 門檻 HK$500</span></div>
+                          <p className="mt-1 text-slate-500">{r.capitalFeasibility.reason}</p>
+                        </div>
+                      )}
+
+                      <div className="px-5 pb-3 text-xs text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
+                        {r.indicators?.volumeSpikeRatio != null && <span>量比 {r.indicators.volumeSpikeRatio.toFixed(2)}x</span>}
+                        {r.indicators?.atr14 != null && <span>ATR14 {r.indicators.atr14.toFixed(2)}</span>}
+                        {r.indicators?.rsi14 != null && <span>RSI14 {r.indicators.rsi14.toFixed(1)}</span>}
+                        {plan && <span>最長持有 {plan.maxHoldingDays} 日</span>}
+                      </div>
+
+                      {r.strategyBacktest && (
+                        <div className="mx-5 mb-3 rounded-xl border border-white/5 bg-white/[0.02] p-3">
+                          <div className="text-slate-400 text-[10px] mb-2">固定規則交易級回測（成本後）</div>
+                          <div className="grid grid-cols-2 gap-2 text-[11px]">
+                            <div><span className="text-slate-500">研究樣本</span><span className="ml-2 text-slate-300">{r.strategyBacktest.inSample.trades}單 · {r.strategyBacktest.inSample.avgR ?? '—'}R</span></div>
+                            <div><span className="text-slate-500">OOS</span><span className="ml-2 text-slate-300">{r.strategyBacktest.outOfSample.trades}單 · {r.strategyBacktest.outOfSample.avgR ?? '—'}R</span></div>
+                          </div>
+                          <p className="text-slate-600 text-[10px] mt-2 leading-relaxed">{r.strategyBacktest.validationNote}</p>
+                        </div>
+                      )}
+
+                      {r.recommendation?.basis && (
+                        <div className="px-5 pb-4">
+                          <p className="text-slate-400 text-xs leading-relaxed">{r.recommendation.basis}</p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

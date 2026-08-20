@@ -11,10 +11,15 @@
  * 3. Time-Space Calibration: Forced HKT time locking and dynamic market phase adaptation for US trading hours.
  * 4. Flexible Profit Locks: Relaxed profit percentage for high-priced stocks and a 'Threshold Softener' switch.
  * 5. Sector Resonance Algorithm: Enhanced detection of sector-wide movements.
+ * 6. Counter-Trend Priority: 跌市時優先推介逆市抗跌股，避免跌市仲推介順勢股。
+ * 7. HKD-based Capital Allocation: 按用戶實際港幣資金配置（總本金/每日用資金/每日目標利潤）重新計算每注資金同利潤門檻。
  */
 
 // ==================== 真實數據源（Finnhub API） ====================
-import { yfinanceData as financeAPI } from "./yfinanceData";
+import { yfinanceData as financeAPI, type HistoricalDataSource } from "./yfinanceData";
+import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateFutuUsStockNetProfit } from './shortTermRisk';
+import { assessCatalyst, type CatalystAssessment, type EarningsEvidence } from './catalystAnalysis';
+import { buildCapitalPlan, type CapitalPlan, type CapitalSettingsInput } from './capitalSettings';
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedScanResult: { result: any; timestamp: number } | null = null;
@@ -35,15 +40,17 @@ interface Indicators {
 interface NewsItem {
   title: string;
   url?: string;
+  datetime?: number;
+  source?: string;
 }
 
 class YFinanceData {
-  async fetchQuote(symbol: string): Promise<Quote | null> {
+  async fetchQuote(symbol: string, suppressErrorLog = false): Promise<Quote | null> {
     try {
       const q = await financeAPI.fetchQuote(symbol);
       return { price: q.price, change: q.change, changePercent: q.changePercent };
     } catch (error) {
-      console.error(`[US Scanner] fetchQuote failed for ${symbol}:`, error);
+      if (!suppressErrorLog) console.error(`[US Scanner] fetchQuote failed for ${symbol}:`, error);
       return null;
     }
   }
@@ -89,36 +96,81 @@ function sleep(ms: number): Promise<void> {
 // ============================================================
 
 const CONFIG = {
-  totalCapital: 100000,        // HK$100,000 total (for reference)
-  positionsCount: 5,           // Target 5 stocks
-  capitalPerPositionMin: 6500, // $6,500 USD
-  capitalPerPositionMax: 13000, // $13,000 USD
-  minTargetProfitPerStock: 130, // $130 USD
-  maxStopLossPercent: 3,       // Max 3% stop loss
-  minConfidence: 60,           // Minimum confidence score
-  thresholdSoftenerEnabled: false, // New: 降維試槍開關
+  // ===== 用戶實際資金配置（港幣為準）=====
+  totalCapitalHKD: 180000,        // 總本金 HK$180,000
+  maxDailyCapitalHKD: 100000,     // 每日最多用嚮交易嘅資金 HK$100,000
+  dailyProfitTargetHKD: 1000,     // 每日目標利潤 HK$1,000
+  expectedPositionsToBuy: 2,      // 5隻推介中，你預期實際會買嘅數量（1-2隻）
+  hkdToUsdRate: 7.8,              // 港幣兌美金匯率，可定期手動更新
+
+  positionsCount: 5,              // 每次推介5隻（不變）
+  maxStopLossPercent: 0.03,      // 以小數表示：最多 3% 初始風險
+  minimumRewardRisk: 1.5,         // 最低 1.5R，否則不推介
+  maxHoldingMinutes: 90,          // intraday time stop，避免訊號變成無限期持倉
+  minConfidence: 60,              // Minimum strategy confirmation score
+  tradeabilityThreshold: 60,     // Minimum daily execution score
+  minimumNetProfitHKD: Number(process.env.MIN_NET_PROFIT_HKD ?? 500),
+  estimatedOneWaySlippageBps: Number(process.env.US_ONE_WAY_SLIPPAGE_BPS ?? 5),
+  thresholdSoftenerEnabled: false, // 降維試槍開關
+
+  // ===== 逆市股偵測（跌市優先推介逆市股）=====
+  downMarketThreshold: -0.003,        // 納指跌幅 > 0.3% 視為跌市
+  counterTrendRelativeStrength: 0.01, // 個股強於大市 1% 先當「逆市股」
 };
 
+// 沒有由介面傳入設定時，沿用舊版假設；正式掃描會以每次 request 的 capitalPlan 覆蓋。
+const DEFAULT_CAPITAL_PLAN = buildCapitalPlan({
+  totalCapitalHKD: CONFIG.totalCapitalHKD,
+  dailyAllocationPercent: (CONFIG.maxDailyCapitalHKD / CONFIG.totalCapitalHKD) * 100,
+  maxOpenPositions: CONFIG.expectedPositionsToBuy,
+});
+
 const US_SECTORS: Record<string, string[]> = {
-  "AI半導體與算力": ["NVDA", "AMD", "AVGO", "MU", "MRVL"],
-  "科技核心巨頭": ["AAPL", "MSFT", "TSLA", "META", "AMZN"],
-  "加密貨幣與Web3": ["COIN", "MSTR", "MARA", "RIOT", "HUT"],
-  "AI應用與雲端": ["PLTR", "SNOW", "NET", "CRWD", "DDOG"],
-  "中概股": ["BABA", "PDD", "NIO", "JD", "XPEV"],
-  "美股特立獨行": ["GME", "HOOD", "SOFI", "AFRM", "DKNG"],
-  "醫藥生物科技": ["LLY", "MRNA", "NVO", "REGN", "VRTX"]
+  // AI半導體與算力（加入ARM、INTC、QCOM、AMAT — 分析師6月大幅升級）
+  "AI半導體與算力": ["NVDA", "AMD", "AVGO", "MU", "MRVL", "ARM", "INTC", "QCOM", "AMAT"],
+  // 科技核心巨頭
+  "科技核心巨頭": ["AAPL", "MSFT", "TSLA", "META", "AMZN", "IBM"],
+  // 加密貨幣（移除MARA/RIOT/HUT活躍度低，保留COIN/MSTR）
+  "加密貨幣與Web3": ["COIN", "MSTR"],
+  // AI應用與雲端安全（加入CRM、SNPS、ZS、PANW — 分析師升級）
+  "AI應用與雲端": ["PLTR", "NET", "CRWD", "DDOG", "CRM", "SNPS", "ZS", "PANW"],
+  // 中概股（移除JD，保留核心）
+  "中概股": ["BABA", "PDD", "NIO", "XPEV"],
+  // 消費與金融科技（加入UBER、AXP — 分析師升級；移除GME）
+  "消費與金融科技": ["SOFI", "AFRM", "DKNG", "UBER", "AXP"],
+  // 醫藥生物科技（加入ARGX、IONS — 分析師目標+40%/+72%）
+  "醫藥生物科技": ["LLY", "MRNA", "NVO", "REGN", "VRTX", "ARGX", "IONS"],
+  // 國防與能源基建（新板塊 — RTX/GD分析師升級）
+  "國防與能源基建": ["RTX", "GD", "VRT"],
 };
 
 const US_STOCK_UNIVERSE: string[] = Array.from(new Set(Object.values(US_SECTORS).flat()));
 
 const US_STOCK_NAMES: Record<string, string> = {
-  "NVDA": "NVIDIA", "AMD": "Advanced Micro Devices", "AVGO": "Broadcom", "MU": "Micron Technology", "MRVL": "Marvell Technology",
-  "AAPL": "Apple", "MSFT": "Microsoft", "TSLA": "Tesla", "META": "Meta Platforms", "AMZN": "Amazon",
-  "COIN": "Coinbase Global", "MSTR": "MicroStrategy", "MARA": "Marathon Digital", "RIOT": "Riot Platforms", "HUT": "Hut 8 Mining",
-  "PLTR": "Palantir Technologies", "SNOW": "Snowflake", "NET": "Cloudflare", "CRWD": "CrowdStrike", "DDOG": "Datadog",
-  "BABA": "Alibaba Group", "PDD": "PDD Holdings", "NIO": "NIO Inc.", "JD": "JD.com", "XPEV": "XPeng",
-  "GME": "GameStop", "HOOD": "Robinhood Markets", "SOFI": "SoFi Technologies", "AFRM": "Affirm Holdings", "DKNG": "DraftKings",
-  "LLY": "Eli Lilly and Company", "MRNA": "Moderna", "NVO": "Novo Nordisk", "REGN": "Regeneron Pharmaceuticals", "VRTX": "Vertex Pharmaceuticals",
+  // AI半導體
+  "NVDA": "NVIDIA", "AMD": "Advanced Micro Devices", "AVGO": "Broadcom",
+  "MU": "Micron Technology", "MRVL": "Marvell Technology",
+  "ARM": "Arm Holdings", "INTC": "Intel", "QCOM": "Qualcomm", "AMAT": "Applied Materials",
+  // 科技巨頭
+  "AAPL": "Apple", "MSFT": "Microsoft", "TSLA": "Tesla",
+  "META": "Meta Platforms", "AMZN": "Amazon", "IBM": "IBM",
+  // 加密
+  "COIN": "Coinbase Global", "MSTR": "MicroStrategy",
+  // AI應用與雲端
+  "PLTR": "Palantir Technologies", "NET": "Cloudflare",
+  "CRWD": "CrowdStrike", "DDOG": "Datadog",
+  "CRM": "Salesforce", "SNPS": "Synopsys", "ZS": "Zscaler", "PANW": "Palo Alto Networks",
+  // 中概股
+  "BABA": "Alibaba Group", "PDD": "PDD Holdings", "NIO": "NIO Inc.", "XPEV": "XPeng",
+  // 消費與金融科技
+  "SOFI": "SoFi Technologies", "AFRM": "Affirm Holdings",
+  "DKNG": "DraftKings", "UBER": "Uber Technologies", "AXP": "American Express",
+  // 醫藥生物科技
+  "LLY": "Eli Lilly", "MRNA": "Moderna", "NVO": "Novo Nordisk",
+  "REGN": "Regeneron Pharmaceuticals", "VRTX": "Vertex Pharmaceuticals",
+  "ARGX": "argenx", "IONS": "Ionis Pharmaceuticals",
+  // 國防與能源基建
+  "RTX": "RTX Corporation", "GD": "General Dynamics", "VRT": "Vertiv Holdings",
 };
 
 const BULLISH_KEYWORDS = [
@@ -163,10 +215,61 @@ export interface V3_7Recommendation {
   bullishNews: boolean;
   newsHeadline: string;
   newsSentimentScore: number;
+  catalystStatus: CatalystAssessment['status'];
+  catalystSummary: string;
+  catalystEvidence: string[];
+  catalystHeadline?: string;
+  catalystUrl?: string;
+  upcomingEarningsDate?: string;
+  recommendationReasons: string[];
   
   confidence: number;
   riskRewardRatio: number;
   debugReason?: string; // Added for debugging
+
+  capitalAllocatedHKD: number;  // 港幣顯示，方便對照實際資金
+  expectedProfitHKD: number;    // 結構目標的估計毛利（未扣成本）
+  estimatedCostsHKD: number;    // 以配置假設計算的買入及賣出成本
+  estimatedNetProfitHKD: number; // 結構目標的估計成本後淨盈利（非保證）
+  minimumNetProfitHKD: number;
+  isCounterTrend: boolean;      // 是否為「逆市抗跌股」
+  entryRule: string;
+  invalidation: string;
+  maxHoldingMinutes: number;
+  tradeabilityScore: number;
+  tradeabilityReason: string;
+}
+
+export type RejectionCode =
+  | 'data_unavailable'
+  | 'catalyst_risk'
+  | 'late_session'
+  | 'relative_strength'
+  | 'overheated'
+  | 'risk_reward_or_stop'
+  | 'profit_structure'
+  | 'net_profit'
+  | 'confidence'
+  | 'tradeability'
+  | 'other';
+
+export interface RejectionSummaryItem {
+  code: RejectionCode;
+  label: string;
+  count: number;
+}
+
+export interface ScanCoverage {
+  requested: number;
+  ready: number;
+  unavailable: number;
+  historyNetwork: number;
+  historyFreshCache: number;
+  historyStaleCache: number;
+  historyCooldownOrBudget: number;
+  windowRequestsUsed: number;
+  windowRequestBudget: number;
+  cooldownRemainingMs: number;
 }
 
 export interface ScanResult {
@@ -175,12 +278,20 @@ export interface ScanResult {
   hkTime: string;
   marketPhase: string;
   indexChangePercent: number;
+  marketBenchmark?: '^IXIC' | 'QQQ' | 'neutral-unavailable';
   totalScanned: number;
   stage1Candidates: number;
   stage2Candidates: number;
   stage3Candidates: number;
   stage4Candidates: number;
-  thresholdSoftenerActive: boolean; // New: 降維試槍開關狀態
+  thresholdSoftenerActive: boolean; // 降維試槍開關狀態
+  isDownMarket?: boolean;           // 是否為跌市模式
+  tradeabilityThreshold: number;
+  qualifiedCandidates: number;
+  capitalPlan?: CapitalPlan;
+  marketClosedNotice?: string;
+  coverage?: ScanCoverage;
+  rejectionSummary?: RejectionSummaryItem[];
 }
 
 // ============================================================
@@ -192,53 +303,33 @@ export interface ScanResult {
  * Module 3: 鎖死「香港實時時區判定」與美股時差校準
  */
 function getHKTimeInfo() {
-  const hktString = new Date().toLocaleString("en-US", { timeZone: "Asia/Hong_Kong", hour12: false });
-  const currentTime = new Date(hktString);
-  const hkHour = currentTime.getHours();
-  const hkMinute = currentTime.getMinutes();
-  const hkDayOfWeek = currentTime.getDay(); // 0=Sunday, 1=Monday, ..., 6=Saturday
-  const hkTimeStr = `${String(hkHour).padStart(2, '0')}:${String(hkMinute).padStart(2, '0')}`;
-
-  let marketPhase = "closed";
-  // US market open (9:30 AM EST) is 9:30 PM HKT
-  // US market close (4:00 PM EST) is 4:00 AM HKT (next day)
-  // Opening hour: 21:30 - 22:30 HKT
-  // Active session: 22:30 - 04:00 HKT
-
-  // ==================== 真實交易日檢查 ====================
-  // 美股交易日係星期一至五（美東時間）。
-  // 因為香港時間快美東12-13小時，美股嘅「星期一09:30」對應香港時間係「星期一21:30」(同一日)，
-  // 但美股「星期五16:00收市」對應香港時間「星期六04:00」。
-  // 所以喺香港時間嘅星期日全日 + 星期一00:00-09:00（仍是上週五美股收市後的延伸）+ 星期六04:00之後
-  // 都屬於美股休市時段。簡化判斷：
-  // - 香港時間星期日（0）→ 美股休市（對應美東星期六）
-  // - 香港時間星期一（1）凌晨0-9時 → 美股已收市（對應美東星期日）
-  // - 香港時間星期六（6）→ 美股只喺04:00前仲營業（對應美東星期五尾市），04:00後休市
-  const isWeekendClosed =
-    hkDayOfWeek === 0 || // 星期日全日休市
-    (hkDayOfWeek === 1 && hkHour < 9) || // 星期一凌晨（對應美東星期日）
-    (hkDayOfWeek === 6 && hkHour >= 4); // 星期六04:00後（對應美東星期五收市後）
-
-  const isTradingDay = !isWeekendClosed;
-
-  // Dynamic Market Phase Determination for US market based on HKT
-  if (isTradingDay) {
-    if ((hkHour === 21 && hkMinute >= 30) || (hkHour === 22 && hkMinute < 30)) {
-      marketPhase = "opening-hour";
-    } else if ((hkHour === 22 && hkMinute >= 30) || (hkHour >= 23) || (hkHour >= 0 && hkHour < 4)) {
-      marketPhase = "active-session";
-    } else if (hkHour >= 9 && hkHour < 15) { // HKT 09:00 - 15:00, US market is closed but allow analysis
-      marketPhase = "closed-analysis";
-    }
-  } else {
-    marketPhase = "market-closed-weekend";
-  }
+  const now = new Date();
+  const getParts = (timeZone: string) => {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone, hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit',
+    }).formatToParts(now);
+    const value = (type: string) => parts.find((part) => part.type === type)?.value || '0';
+    const weekday = value('weekday');
+    return { hour: Number(value('hour')), minute: Number(value('minute')), weekday };
+  };
+  const hk = getParts('Asia/Hong_Kong');
+  const ny = getParts('America/New_York');
+  const hkTimeStr = `${String(hk.hour).padStart(2, '0')}:${String(hk.minute).padStart(2, '0')}`;
+  const nyMinutes = ny.hour * 60 + ny.minute;
+  const isTradingDay = !['Sat', 'Sun'].includes(ny.weekday);
+  const marketPhase = !isTradingDay
+    ? 'market-closed-weekend'
+    : nyMinutes >= 570 && nyMinutes < 630
+      ? 'opening-hour'
+      : nyMinutes >= 630 && nyMinutes < 960
+        ? 'active-session'
+        : 'closed-analysis';
 
   if (DEBUG_MODE) {
-    console.log(`[DEBUG] HKT Time: ${hkTimeStr} (Day ${hkDayOfWeek}), Market Phase: ${marketPhase}, IsTradingDay: ${isTradingDay}`);
+    console.log(`[DEBUG] HKT ${hkTimeStr}; NY ${ny.hour}:${String(ny.minute).padStart(2, '0')}; phase ${marketPhase}; weekday ${ny.weekday}`);
   }
-
-  return { hkHour, hkMinute, hkTimeStr, marketPhase, isTradingDay };
+  // 公眾假期仍須由資料供應商是否返回有效 quote / bar 作最後 gate。
+  return { hkHour: hk.hour, hkMinute: hk.minute, hkTimeStr, nyHour: ny.hour, nyMinute: ny.minute, marketPhase, isTradingDay };
 }
 
 /**
@@ -311,9 +402,195 @@ function calculateATR(candles: Candle[], period: number = 14): number {
 }
 
 /**
+ * Minervini 技術指標評分函數
+ * 短炒用「加分制」，唔係硬性過濾，符合條件加分，唔符合唔扣分
+ *
+ * 條件一覽：
+ * 1. 股價 > $5（基本條件）
+ * 2. 股價不低於20日最低位（確認支撐）
+ * 3. 3個月回報 ≥ 20%（強勢股動力）
+ * 4. 每日成交金額50日均 > $500萬（流動性足夠）
+ * 5. Average daily range > 3.5%（足夠波動）
+ * 6. 不高於200日線60%（未過熱）
+ * 7. 接近10/20/50日EMA（低風險入場位）
+ * 8+9. VCP整固：5-40日，range < 8%（即將爆發形態）
+ */
+function calculateMinerviniScore(
+  currentPrice: number,
+  closes: number[],
+  highs: number[],
+  lows: number[],
+  volumes: number[],
+  ema20: number
+): { score: number; tags: string[] } {
+  // ===== Minervini VCP 加分制（總分上限100分）=====
+  // 分數按你嘅加權設定：
+  //   3個月回報 ≥20%     → 20分（最重要，動力確認）
+  //   整固Range <8%      → 15分（VCP收窄確認）
+  //   ADR >3.5%          → 15分（足夠波動）
+  //   股價不低於20日低位  → 10分（支撐確認）
+  //   成交額 >500萬       → 10分（流動性）
+  //   接近EMA10/20/50    → 10分（低風險入場位，三條各佔）
+  //   整固5-40日          → 10分（整固時間）
+  //   股價 > $5           → 5分（基本條件）
+  //   不高於200MA 60%    → 5分（唔係過熱）
+  // 總分上限：100分
+
+  let score = 0;
+  const tags: string[] = [];
+
+  // ① 股價 > $5（5分）
+  if (currentPrice > 5) {
+    score += 5;
+    tags.push("P>$5");
+  }
+
+  // ② 股價不低於20日最低位（10分）
+  if (lows.length >= 20) {
+    const twentyDayLow = Math.min(...lows.slice(-20));
+    if (currentPrice >= twentyDayLow) {
+      score += 10;
+      tags.push("AboveLow20");
+    }
+  }
+
+  // ③ 3個月回報 ≥ 20%（20分，係最重嘅條件）
+  if (closes.length >= 63) {
+    const threeMonthReturn = (currentPrice - closes[closes.length - 63]) / closes[closes.length - 63];
+    if (threeMonthReturn >= 0.20) {
+      score += 20;
+      tags.push(`3M+${(threeMonthReturn * 100).toFixed(0)}%`);
+    } else if (threeMonthReturn >= 0.10) {
+      score += 8; // 10-20%之間部分加分
+    }
+  }
+
+  // ④ 每日成交金額50日均 > $500萬美元（10分）
+  if (closes.length >= 50 && volumes.length >= 50) {
+    const last50Closes = closes.slice(-50);
+    const last50Volumes = volumes.slice(-50);
+    const avgDollarVolume = last50Closes.reduce((sum, c, i) => sum + c * (last50Volumes[i] || 0), 0) / 50;
+    if (avgDollarVolume >= 5000000) {
+      score += 10;
+      tags.push("Vol$OK");
+    }
+  }
+
+  // ⑤ Average daily range > 3.5%（15分）
+  if (closes.length >= 20 && highs.length >= 20 && lows.length >= 20) {
+    const last20Highs = highs.slice(-20);
+    const last20Lows = lows.slice(-20);
+    const last20Closes = closes.slice(-20);
+    const avgDailyRange = last20Highs.reduce((sum, h, i) => {
+      return sum + (h - last20Lows[i]) / (last20Closes[i] || 1);
+    }, 0) / 20;
+    if (avgDailyRange >= 0.035) {
+      score += 15;
+      tags.push(`ADR${(avgDailyRange * 100).toFixed(1)}%`);
+    } else if (avgDailyRange >= 0.02) {
+      score += 5; // 2-3.5%之間部分加分
+    }
+  }
+
+  // ⑥ 不高於200日線60%（5分）
+  if (closes.length >= 200) {
+    const sma200 = closes.slice(-200).reduce((a, b) => a + b, 0) / 200;
+    const distanceFromMA200 = (currentPrice - sma200) / sma200;
+    if (distanceFromMA200 <= 0.60) {
+      score += 5;
+      tags.push(`MA200+${(distanceFromMA200 * 100).toFixed(0)}%`);
+    }
+  } else if (closes.length >= 100) {
+    // 數據唔夠200日，用SMA100近似，分數打折
+    const sma100 = closes.slice(-100).reduce((a, b) => a + b, 0) / 100;
+    if ((currentPrice - sma100) / sma100 <= 0.50) {
+      score += 2;
+    }
+  }
+
+  // ⑦ 接近EMA10/20/50（合共10分，三條各約3-4分）
+  if (closes.length >= 50) {
+    const ema10 = calculateEMA(closes, 10);
+    const ema50 = calculateEMA(closes, 50);
+
+    const distEMA10 = Math.abs(currentPrice - ema10) / ema10;
+    const distEMA20 = Math.abs(currentPrice - ema20) / ema20;
+    const distEMA50 = Math.abs(currentPrice - ema50) / ema50;
+
+    // 各EMA：股價喺EMA上方且距離 < 3% 得滿分，3-6%得半分
+    if (currentPrice >= ema10 && distEMA10 <= 0.03) { score += 4; tags.push("EMA10✓"); }
+    else if (currentPrice >= ema10 && distEMA10 <= 0.06) { score += 2; }
+
+    if (currentPrice >= ema20 && distEMA20 <= 0.03) { score += 3; tags.push("EMA20✓"); }
+    else if (currentPrice >= ema20 && distEMA20 <= 0.06) { score += 1; }
+
+    if (currentPrice >= ema50 && distEMA50 <= 0.05) { score += 3; tags.push("EMA50✓"); }
+    else if (currentPrice >= ema50 && distEMA50 <= 0.08) { score += 1; }
+  }
+
+  // ⑧ 整固5-40日（10分）+ ⑨ 整固Range <8%（15分）
+  // 兩個條件綁在一起：搵出最佳整固窗口
+  if (closes.length >= 40 && highs.length >= 40 && lows.length >= 40) {
+    let bestConsolidationDays = 0;
+    let bestRange = 1;
+    let hasVolumeContraction = false;
+
+    for (let days = 5; days <= 40; days++) {
+      const windowHighs = highs.slice(-days);
+      const windowLows = lows.slice(-days);
+      const windowVolumes = volumes.slice(-days);
+
+      const periodHigh = Math.max(...windowHighs);
+      const periodLow = Math.min(...windowLows);
+      const range = (periodHigh - periodLow) / periodLow;
+
+      if (range < 0.08) {
+        if (days > bestConsolidationDays) {
+          bestConsolidationDays = days;
+          bestRange = range;
+        }
+        // 檢查成交量收縮（VCP最強確認）
+        if (windowVolumes.length >= 10) {
+          const recentAvgVol = windowVolumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
+          const priorAvgVol = windowVolumes.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
+          if (priorAvgVol > 0 && recentAvgVol < priorAvgVol * 1.1) {
+            hasVolumeContraction = true;
+          }
+        }
+      }
+    }
+
+    if (bestConsolidationDays >= 5) {
+      // ⑧ 整固5-40日：10分
+      score += 10;
+      tags.push(`Consol${bestConsolidationDays}d`);
+
+      // ⑨ 整固Range <8%：15分（已確認因為 range < 0.08）
+      score += 15;
+      tags.push(`Range${(bestRange * 100).toFixed(1)}%`);
+
+      // 額外：成交量收縮（VCP完整形態）再加5分
+      if (hasVolumeContraction) {
+        score += 5;
+        tags.push("VCP✓");
+      }
+    }
+  }
+
+  // 上限100分，但唔影響原本confidence（原本confidence有自己嘅上限處理）
+  return { score: Math.min(score, 100), tags };
+}
+
+/**
  * Module 2: Stage 3 真實新聞 — 用 Finnhub /company-news endpoint
  */
+const newsCache = new Map<string, { expiresAt: number; items: NewsItem[] }>();
+const NEWS_CACHE_TTL_MS = 15 * 60 * 1000;
+
 async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
+  const normalizedSymbol = symbol.toUpperCase();
+  const cached = newsCache.get(normalizedSymbol);
+  if (cached && cached.expiresAt > Date.now()) return cached.items;
   try {
     const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "";
     const today = new Date();
@@ -332,17 +609,84 @@ async function getUSStockNews(symbol: string): Promise<NewsItem[]> {
     }
 
     const data = await response.json();
-    if (!Array.isArray(data) || data.length === 0) return [];
+    if (!Array.isArray(data) || data.length === 0) {
+      newsCache.set(normalizedSymbol, { items: [], expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
+      return [];
+    }
 
-    return data.slice(0, 3).map((item: any) => ({
+    const items = data.slice(0, 8).map((item: any) => ({
       title: item.headline || "",
       url: item.url || "",
+      datetime: Number(item.datetime) || undefined,
+      source: item.source || undefined,
     }));
+    newsCache.set(normalizedSymbol, { items, expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
+    return items;
 
   } catch (error) {
     console.error(`[News] Error fetching news for ${symbol}:`, error);
     return [];
   }
+}
+
+interface EarningsEvent extends EarningsEvidence { symbol: string }
+let earningsCalendarCache: { expiresAt: number; events: EarningsEvent[] } | null = null;
+let earningsCalendarRequest: Promise<EarningsEvent[]> | null = null;
+
+async function getUSEarningsCalendar(): Promise<EarningsEvent[]> {
+  const nowMs = Date.now();
+  if (earningsCalendarCache && earningsCalendarCache.expiresAt > nowMs) return earningsCalendarCache.events;
+  if (earningsCalendarRequest) return earningsCalendarRequest;
+
+  earningsCalendarRequest = (async () => {
+    try {
+      const FINNHUB_KEY = process.env.FINNHUB_API_KEY || "";
+      if (!FINNHUB_KEY) return [];
+      const now = new Date();
+      const from = new Date(now);
+      const to = new Date(now);
+      from.setDate(from.getDate() - 14);
+      to.setDate(to.getDate() + 8);
+      const formatDate = (date: Date) => date.toISOString().slice(0, 10);
+      const url = `https://finnhub.io/api/v1/calendar/earnings?from=${formatDate(from)}&to=${formatDate(to)}&token=${FINNHUB_KEY}`;
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (!response.ok) return [];
+      const payload = await response.json();
+      const calendar = Array.isArray(payload?.earningsCalendar) ? payload.earningsCalendar : [];
+      const events = calendar
+        .filter((item: any) => typeof item?.symbol === 'string' && typeof item?.date === 'string')
+        .map((item: any) => ({
+          symbol: String(item.symbol).toUpperCase(),
+          date: item.date,
+          hour: item.hour || undefined,
+          epsActual: typeof item.epsActual === 'number' ? item.epsActual : null,
+          epsEstimate: typeof item.epsEstimate === 'number' ? item.epsEstimate : null,
+          revenueActual: typeof item.revenueActual === 'number' ? item.revenueActual : null,
+          revenueEstimate: typeof item.revenueEstimate === 'number' ? item.revenueEstimate : null,
+        }));
+      earningsCalendarCache = { events, expiresAt: nowMs + 60 * 60 * 1000 };
+      return events;
+    } catch (error) {
+      console.warn('[Earnings] unable to read earnings calendar:', error);
+      return [];
+    } finally {
+      earningsCalendarRequest = null;
+    }
+  })();
+  return earningsCalendarRequest;
+}
+
+async function getUSEarningsEvents(symbol: string): Promise<EarningsEvent[]> {
+  const events = await getUSEarningsCalendar();
+  return events.filter((item) => item.symbol === symbol.toUpperCase());
+}
+
+function selectCatalyst(symbol: string, news: NewsItem[], earnings: EarningsEvent[]): CatalystAssessment {
+  const today = new Date().toISOString().slice(0, 10);
+  const ordered = [...earnings].sort((a, b) => a.date.localeCompare(b.date));
+  const upcoming = ordered.find((item) => item.date >= today) ?? null;
+  const recent = [...ordered].reverse().find((item) => item.date < today) ?? null;
+  return assessCatalyst({ headlines: news, upcomingEarnings: upcoming, recentEarnings: recent });
 }
 
 function hasBullishNews(news: NewsItem[]): boolean {
@@ -404,45 +748,38 @@ function calculateResistance(
 /**
  * Validate profit feasibility with flexible capital and US lot size (1 share)
  * Module 4: 放寬高價股鐵鎖與加入『降維試槍開關』
+ * 已改為按用戶實際 HKD 資金配置（capitalPerPositionUSD / minTargetProfitPerStockUSD）計算
  */
 function validateProfitFeasibility(
   currentPrice: number,
   takeProfitPrice: number,
   symbol: string,
   hkHour: number,
-  thresholdSoftenerActive: boolean
+  thresholdSoftenerActive: boolean,
+  capitalPlan: CapitalPlan
 ): { feasible: boolean; sharesCanBuy: number; expectedProfit: number; capitalAllocated: number; lotSize: number; reason: string } {
   const lotSize = 1; // US stocks typically trade in 1 share increments
-  // 戰術變更: 資金重新對齊，鎖定在上限 $13,000 美元
-  const capitalOptions = [CONFIG.capitalPerPositionMax];
+  // 戰術變更: 資金按用戶實際每日可用資金 / 預期買入注數 計算
+  const capitalOptions = [capitalPlan.capitalPerPositionHKD / CONFIG.hkdToUsdRate];
   
   let bestShares = 0;
   let bestExpectedProfit = 0;
   let actualCapitalAllocated = 0;
   let feasibilityReason = "";
 
-  let currentMinTargetProfit = CONFIG.minTargetProfitPerStock;
-  // 核心修正: 超過 23:30 HKT，提高預期利潤門檻
-  if (hkHour >= 23 || hkHour < 4) { // Covers 23:30 HKT to 04:00 HKT
-    currentMinTargetProfit = CONFIG.minTargetProfitPerStock * 1.2; // $130 * 1.2 = $156
-  }
 
-  // 降維試槍開關: 當開關啟用時，利潤硬門檻打 8 折
-  if (thresholdSoftenerActive) {
-    currentMinTargetProfit *= 0.8;
-  }
 
   for (const capital of capitalOptions) {
     const sharesCanBuy = Math.floor(capital / currentPrice);
 
     if (sharesCanBuy === 0) {
-      feasibilityReason = `Capital (${capital} USD) insufficient to buy 1 share`;
+      feasibilityReason = `Capital (${capital.toFixed(0)} USD) insufficient to buy 1 share`;
       continue;
     }
 
     const currentExpectedProfit = (takeProfitPrice - currentPrice) * sharesCanBuy;
 
-    if (currentExpectedProfit >= currentMinTargetProfit && sharesCanBuy > bestShares) {
+    if (sharesCanBuy > bestShares) {
       bestShares = sharesCanBuy;
       bestExpectedProfit = currentExpectedProfit;
       actualCapitalAllocated = capital;
@@ -450,14 +787,14 @@ function validateProfitFeasibility(
   }
 
   if (bestShares === 0) {
-    return { feasible: false, sharesCanBuy: 0, expectedProfit: 0, capitalAllocated: 0, lotSize, reason: feasibilityReason || `Cannot meet min profit (${currentMinTargetProfit.toFixed(0)} USD) or buy 1 share` };
+    return { feasible: false, sharesCanBuy: 0, expectedProfit: 0, capitalAllocated: 0, lotSize, reason: feasibilityReason || '資金不足以買入 1 股。' };
   }
 
   const tickSize = getTickSize(currentPrice);
   const ticksAvailable = Math.floor((takeProfitPrice - currentPrice) / tickSize);
   
-  let feasible = bestExpectedProfit >= currentMinTargetProfit && ticksAvailable >= 1;
-  feasibilityReason = feasible ? "Meets profit requirements" : `Expected profit (${bestExpectedProfit.toFixed(0)} USD) below ${currentMinTargetProfit.toFixed(0)} USD threshold`;
+  let feasible = ticksAvailable >= 1;
+  feasibilityReason = feasible ? '有至少一個有效價格跳動，下一步交由成本後淨盈利門檻判定。' : '結構目標不足一個有效價格跳動。';
 
   // Module 4: 放寬高價股鐵鎖 (Price > $100) 必須滿足「利潤百分比 > 1.0%」
   if (feasible && currentPrice > 100) {
@@ -476,26 +813,37 @@ interface StockData {
   candles: Candle[];
   indicators: Indicators;
   news: NewsItem[];
+  catalyst: CatalystAssessment;
   volumeRatio: number;
   volumeSpike: boolean;
+  historicalSource: HistoricalDataSource;
+  historicalWarning?: string;
 }
 
-async function analyzeStock(symbol: string): Promise<StockData | null> {
+interface StockAnalysisResult {
+  data: StockData | null;
+  dataIssue?: string;
+  historicalSource?: HistoricalDataSource;
+}
+
+async function analyzeStock(symbol: string): Promise<StockAnalysisResult> {
   try {
-    const quote = await yfinanceData.fetchQuote(symbol);
-    if (!quote || quote.price <= 0) {
-      // console.log(`[US V3.7] ${symbol}: No price data, skipping`);
-      return null;
+    // 先確認日線是否可用；當 Twelve Data 預算／cooldown 阻擋新股票時，
+    // 不再額外對該股票發送 Finnhub quote 或 news 請求。
+    const history = await financeAPI.fetchHistoricalDataWithMeta(symbol, '3mo');
+    const candles = history.candles;
+    if (candles.length < 20) {
+      return { data: null, dataIssue: `history_${history.source}`, historicalSource: history.source };
     }
 
-    const candles = await yfinanceData.fetchHistoricalData(symbol, "3mo");
-    if (candles.length < 20) {
-      // console.log(`[US V3.7] ${symbol}: Insufficient historical data, skipping`);
-      return null;
+    const quote = await yfinanceData.fetchQuote(symbol);
+    if (!quote || quote.price <= 0) {
+      return { data: null, dataIssue: 'quote_unavailable', historicalSource: history.source };
     }
     
     const indicators = yfinanceData.calculateIndicators(candles);
-    const news = await getUSStockNews(symbol);
+    const [news, earnings] = await Promise.all([getUSStockNews(symbol), getUSEarningsEvents(symbol)]);
+    const catalyst = selectCatalyst(symbol, news, earnings);
 
     const todayVolume = candles[candles.length - 1]?.volume || 0;
     const past5DaysVolumes = candles.slice(-6, -1).map(c => c.volume);
@@ -504,17 +852,62 @@ async function analyzeStock(symbol: string): Promise<StockData | null> {
     const volumeSpike = volumeRatio > 1.3; // +30% spike
 
     return {
-      quote,
-      indicators,
-      candles,
-      news,
-      volumeRatio,
-      volumeSpike,
+      data: {
+        quote,
+        indicators,
+        candles,
+        news,
+        catalyst,
+        volumeRatio,
+        volumeSpike,
+        historicalSource: history.source,
+        historicalWarning: history.error,
+      },
+      historicalSource: history.source,
     };
   } catch (error) {
     console.error(`Error analyzing ${symbol}:`, error);
-    return null;
+    return { data: null, dataIssue: 'unexpected_error' };
   }
+}
+
+const REJECTION_LABELS: Record<RejectionCode, string> = {
+  data_unavailable: '資料不足／供應商限流',
+  catalyst_risk: '業績或事件風險',
+  late_session: '尾市動能不足',
+  relative_strength: '相對強度不足或非上升',
+  overheated: '當日升幅過熱',
+  risk_reward_or_stop: '止蝕或至少 1.5R 結構不合格',
+  profit_structure: '目標價／最小 tick／倉位結構不可行',
+  net_profit: '成本後淨盈利未達 HK$500',
+  confidence: '策略確認分數不足',
+  tradeability: 'Tradeability Score 未達門檻',
+  other: '其他規則未通過',
+};
+
+function classifyRejection(reason: string): RejectionCode {
+  if (/No data available|quote_unavailable|history_|資料不足|限流|cooldown/i.test(reason)) return 'data_unavailable';
+  if (/事件風險|業績|catalyst/i.test(reason)) return 'catalyst_risk';
+  if (/Late Session/i.test(reason)) return 'late_session';
+  if (/Relative Strength/i.test(reason)) return 'relative_strength';
+  if (/Overheated/i.test(reason)) return 'overheated';
+  if (/成本後淨盈利/i.test(reason)) return 'net_profit';
+  if (/Profit Feasibility|有效價格跳動|資金不足/i.test(reason)) return 'profit_structure';
+  if (/Risk Plan|至少 .*R|回報風險|止蝕/i.test(reason)) return 'risk_reward_or_stop';
+  if (/Confidence/i.test(reason)) return 'confidence';
+  if (/Tradeability Score/i.test(reason)) return 'tradeability';
+  return 'other';
+}
+
+function buildRejectionSummary(rejectedBySymbol: Map<string, string>): RejectionSummaryItem[] {
+  const counts = new Map<RejectionCode, number>();
+  for (const reason of Array.from(rejectedBySymbol.values())) {
+    const code = classifyRejection(reason);
+    counts.set(code, (counts.get(code) || 0) + 1);
+  }
+  return (Object.keys(REJECTION_LABELS) as RejectionCode[])
+    .map((code) => ({ code, label: REJECTION_LABELS[code], count: counts.get(code) || 0 }))
+    .filter((item) => item.count > 0);
 }
 
 function buildRecommendation(
@@ -526,21 +919,27 @@ function buildRecommendation(
   indexChangePercent: number,
   hkTimeInfo: ReturnType<typeof getHKTimeInfo>,
   isResonance: boolean = false,
-  thresholdSoftenerActive: boolean
+  thresholdSoftenerActive: boolean,
+  capitalPlan: CapitalPlan = DEFAULT_CAPITAL_PLAN
 ): { recommendation: V3_7Recommendation | null; debugReason: string } {
-  const { quote, indicators, candles, news, volumeRatio, volumeSpike } = data;
+  const { quote, indicators, candles, news, catalyst, volumeRatio, volumeSpike } = data;
   
   const currentPrice = quote.price;
-  const prevClose = candles[candles.length - 2]?.close || currentPrice; 
-  const changePercent = ((currentPrice - prevClose) / prevClose);
+  // 報價供應商以 previous close 計算的變幅，避免日線資料有／無當日未完成 bar 時訊號改變。
+  const changePercent = quote.changePercent;
   const stockName = US_STOCK_NAMES[symbol] || symbol;
 
   let debugReason = ``;
 
-  // Module 3: 調整 Stage 4 晚盤判定: 以香港時間為準，超過 23:30 HKT 後進入美股深夜盤，強制實施 `changePercent > 0` 限制
-  if (hkTimeInfo.hkHour >= 23 && hkTimeInfo.hkMinute >= 30 || hkTimeInfo.hkHour < 4) { // After 23:30 HKT
+  if (catalyst.blockTrade) {
+    debugReason = `事件風險保護：${catalyst.summary}`;
+    return { recommendation: null, debugReason };
+  }
+
+  // 美東 14:30 後只接受仍然上升的股票；以 America/New_York 計算，避免夏令時間令 HKT 固定時段錯位。
+  if (hkTimeInfo.nyHour > 14 || (hkTimeInfo.nyHour === 14 && hkTimeInfo.nyMinute >= 30)) {
     if (changePercent <= 0) {
-      debugReason = `Late Session (after 23:30 HKT): Stock is not rising (changePercent: ${(changePercent * 100).toFixed(2)}%)`;
+      debugReason = `Late Session: stock is not rising (changePercent: ${(changePercent * 100).toFixed(2)}%)`;
       return { recommendation: null, debugReason };
     }
   }
@@ -561,19 +960,51 @@ function buildRecommendation(
   const ema10 = closes.length >= 10 ? calculateEMA(closes, 10) : 0;
   const atrPercent = currentPrice > 0 ? (indicators.atr / currentPrice) * 100 : 0;
 
-  const { resistanceLevel, source: resistanceSource } = calculateResistance(candles, currentPrice, indicators.atr);
-  
-  // 戰術變更: 止盈位（TP）計算大瘦身（改為 0.5x ATR）
-  let takeProfitPrice = currentPrice + indicators.atr * 0.5;
-  
-  const stopLossDistance = Math.max(indicators.atr * 0.7, currentPrice * 0.02); 
-  const stopLossPrice = currentPrice - stopLossDistance;
-  
-  const feasibilityInfo = validateProfitFeasibility(currentPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive);
+  const riskPlanResult = buildLongIntradayRiskPlan({
+    currentPrice,
+    atr: indicators.atr,
+    candles,
+    tickSize: getTickSize(currentPrice),
+    maxStopLossPercent: CONFIG.maxStopLossPercent,
+    minimumRewardRisk: CONFIG.minimumRewardRisk,
+    maxHoldingMinutes: CONFIG.maxHoldingMinutes,
+  });
+  if (!riskPlanResult.plan) {
+    debugReason = `Risk Plan Rejected: ${riskPlanResult.reason}`;
+    return { recommendation: null, debugReason };
+  }
+  const { entryPrice: plannedEntryPrice, takeProfitPrice, stopLossPrice, resistanceLevel, resistanceSource, riskRewardRatio, entryRule, invalidation, maxHoldingMinutes } = riskPlanResult.plan;
+
+  const feasibilityInfo = validateProfitFeasibility(plannedEntryPrice, takeProfitPrice, symbol, hkTimeInfo.hkHour, thresholdSoftenerActive, capitalPlan);
   
   if (!feasibilityInfo.feasible) {
     debugReason = `Profit Feasibility Check Failed: ${feasibilityInfo.reason}`;
     return { recommendation: null, debugReason };
+  }
+
+  // ===== 港幣顯示換算 + 逆市抗跌股判定 =====
+  const netProfitEligibility = evaluateFutuUsStockNetProfit({
+    entryPrice: plannedEntryPrice,
+    targetPrice: takeProfitPrice,
+    shares: feasibilityInfo.sharesCanBuy,
+    oneWaySlippageBps: CONFIG.estimatedOneWaySlippageBps,
+    fxToHKD: CONFIG.hkdToUsdRate,
+    minimumNetProfitHKD: CONFIG.minimumNetProfitHKD,
+  });
+  if (!netProfitEligibility.feasible) {
+    debugReason = `成本後淨盈利檢查未通過: ${netProfitEligibility.reason}`;
+    return { recommendation: null, debugReason };
+  }
+
+  const capitalAllocatedHKD = feasibilityInfo.capitalAllocated * CONFIG.hkdToUsdRate;
+  const expectedProfitHKD = netProfitEligibility.estimatedGrossProfitHKD;
+  const estimatedCostsHKD = netProfitEligibility.estimatedCostsHKD;
+  const estimatedNetProfitHKD = netProfitEligibility.estimatedNetProfitHKD;
+  const isCounterTrend = indexChangePercent <= CONFIG.downMarketThreshold &&
+    (changePercent - indexChangePercent) >= CONFIG.counterTrendRelativeStrength;
+
+  if (isCounterTrend) {
+    triggerReason = "💎逆市抗跌股 | " + triggerReason;
   }
         
   let confidence = 50; 
@@ -592,21 +1023,29 @@ function buildRecommendation(
     confidence += 15;
   }
 
+  // 逆市抗跌股額外加分（比一般逆市加分更高，因為符合更嚴格嘅相對強度門檻）
+  if (isCounterTrend) {
+    confidence += 10;
+  }
+
   // 爆量異動 (volumeSpike)
   if (volumeSpike) {
     triggerReason += " | 爆量異動";
     confidence += 10;
   }
 
-  // Module 2: Stage 3 利好新聞爆破
-  if (hasBullishNews(news)) {
-    triggerReason += " | 利好新聞爆破";
-    confidence += 15;
+  // 可追溯的催化只作有限加分；未公布業績絕不當成正面預期。
+  if (catalyst.status === 'verified-positive') {
+    triggerReason += ` | 催化：${catalyst.primaryHeadline || catalyst.summary}`;
+    confidence += catalyst.scoreAdjustment;
+  } else if (catalyst.upcomingEarningsDate) {
+    triggerReason += ` | 業績窗口 ${catalyst.upcomingEarningsDate}（不作正面加分）`;
   }
 
   // 板塊共振拉滿信心
   if (isResonance) {
-    confidence = 100; // 信心指數直接拉滿至100%
+    // 板塊共振只是一項 feature，不可把未經校準的分數直接標示為 100% 勝率。
+    confidence += 5;
   }
   
   // 降維試槍開關: 當開關啟用時，RSI 限制放寬至 >45
@@ -619,17 +1058,51 @@ function buildRecommendation(
     }
   }
 
-  confidence = Math.max(0, Math.min(100, confidence));
+  // ===== Minervini 技術指標加分（唔係過濾，符合加分，唔符合唔扣分）=====
+  // closes 已喺上面宣告，直接用；highs/lows/volumes 新增
+  const mHighs = candles.map((c: any) => c.high).filter((h: number) => h > 0);
+  const mLows = candles.map((c: any) => c.low).filter((l: number) => l > 0);
+  const mVolumes = candles.map((c: any) => c.volume).filter((v: number) => v > 0);
+  const minerviniBonus = calculateMinerviniScore(
+    currentPrice, closes, mHighs, mLows, mVolumes, indicators.ema20
+  );
+  confidence += minerviniBonus.score;
+  if (minerviniBonus.score > 0) {
+    triggerReason += ` | 📐 Minervini+${minerviniBonus.score}(${minerviniBonus.tags.join(",")})`;
+  }
 
-  const potentialProfit = takeProfitPrice - currentPrice;
-  const potentialLoss = currentPrice - stopLossPrice;
-  const riskRewardRatio = potentialLoss > 0 ? potentialProfit / potentialLoss : 0;
+  confidence = Math.max(0, Math.min(100, confidence));
+  if (confidence < CONFIG.minConfidence) {
+    debugReason = `Confidence ${confidence} below minimum ${CONFIG.minConfidence}; not enough independent confirmations.`;
+    return { recommendation: null, debugReason };
+  }
+
+  const tradeability = calculateTradeabilityScore({
+    volumeRatio,
+    relativeStrength: changePercent - indexChangePercent,
+    atrPercent,
+    riskRewardRatio,
+    isCounterTrend,
+  }, CONFIG.tradeabilityThreshold);
+  if (!tradeability.passed) {
+    debugReason = tradeability.reason;
+    return { recommendation: null, debugReason };
+  }
+  triggerReason += ` | ${tradeability.reason}`;
+  const recommendationReasons = [
+    `相對強度：當日 ${(changePercent * 100).toFixed(2)}%，相對指數 ${((changePercent - indexChangePercent) * 100).toFixed(2)}%。`,
+    `風險計劃：入場 $${plannedEntryPrice.toFixed(2)}、止蝕 $${stopLossPrice.toFixed(2)}、結構目標 $${takeProfitPrice.toFixed(2)}、${riskRewardRatio.toFixed(2)}R。`,
+    `可交易性：${tradeability.reason}`,
+    `成本後門檻：${netProfitEligibility.reason}`,
+    `催化／事件：${catalyst.summary}`,
+    ...catalyst.evidence,
+  ];
   
   return {
     recommendation: {
       symbol,
       stockName,
-      currentPrice,
+      currentPrice: plannedEntryPrice,
       change: quote.change,
       changePercent: quote.changePercent,
       
@@ -646,7 +1119,7 @@ function buildRecommendation(
       sharesCanBuy: feasibilityInfo.sharesCanBuy,
       expectedProfit: feasibilityInfo.expectedProfit,
       capitalAllocated: feasibilityInfo.capitalAllocated,
-      profitFeasible: feasibilityInfo.feasible,
+      profitFeasible: netProfitEligibility.feasible,
       
       rsi: indicators.rsi,
       ema10,
@@ -657,13 +1130,32 @@ function buildRecommendation(
       volumeRatio,
       volumeSpike,
       
-      bullishNews: hasBullishNews(news),
-      newsHeadline: news.length > 0 ? news[0].title : "",
-      newsSentimentScore: getNewsSentimentScore(news),
+      bullishNews: catalyst.status === 'verified-positive',
+      newsHeadline: catalyst.primaryHeadline || news[0]?.title || "",
+      newsSentimentScore: catalyst.status === 'verified-positive' ? 0.8 : 0.2,
+      catalystStatus: catalyst.status,
+      catalystSummary: catalyst.summary,
+      catalystEvidence: catalyst.evidence,
+      catalystHeadline: catalyst.primaryHeadline,
+      catalystUrl: catalyst.primaryUrl,
+      upcomingEarningsDate: catalyst.upcomingEarningsDate,
+      recommendationReasons,
       
       confidence,
       riskRewardRatio,
       debugReason,
+      entryRule,
+      invalidation,
+      maxHoldingMinutes,
+      tradeabilityScore: tradeability.score,
+      tradeabilityReason: tradeability.reason,
+
+      capitalAllocatedHKD,
+      expectedProfitHKD,
+      estimatedCostsHKD,
+      estimatedNetProfitHKD,
+      minimumNetProfitHKD: netProfitEligibility.minimumNetProfitHKD,
+      isCounterTrend,
     },
     debugReason: debugReason
   };
@@ -673,9 +1165,11 @@ function buildRecommendation(
 // MAIN SCANNER FUNCTION
 // ============================================================
 
-export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false): Promise<ScanResult> {
+export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false, capitalSettings?: CapitalSettingsInput): Promise<ScanResult> {
+  const capitalPlan = buildCapitalPlan(capitalSettings);
+  const canUseCache = capitalSettings == null;
   // ==================== Cache 檢查（15分鐘內直接返回） ====================
-  if (cachedScanResult && (Date.now() - cachedScanResult.timestamp) < SCAN_CACHE_TTL_MS) {
+  if (canUseCache && cachedScanResult && (Date.now() - cachedScanResult.timestamp) < SCAN_CACHE_TTL_MS) {
     const ageMinutes = Math.floor((Date.now() - cachedScanResult.timestamp) / 60000);
     console.log(`[US V3.7] ✅ 使用 Cache 數據（${ageMinutes} 分鐘前掃描），避免重複請求 Finnhub`);
     return cachedScanResult.result;
@@ -702,40 +1196,101 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
       stage3Candidates: 0,
       stage4Candidates: 0,
       thresholdSoftenerActive: thresholdSoftenerActive,
+      isDownMarket: false,
+      tradeabilityThreshold: CONFIG.tradeabilityThreshold,
+      qualifiedCandidates: 0,
       marketClosedNotice: "美股今日休市（週末），請於美股交易日（香港時間星期一21:30 - 星期六04:00）再嘗試掃描。",
     };
     cachedScanResult = { result: closedResult, timestamp: Date.now() };
     return closedResult;
   }
-  console.log(`[US V3.7] 單注資金範圍: $${CONFIG.capitalPerPositionMin} - $${CONFIG.capitalPerPositionMax} USD, 最低目標利潤: $${CONFIG.minTargetProfitPerStock} USD/股`);
+  // 短炒計劃只在正式 regular session 產生；收市分析不可偽裝為可即時下單訊號。
+  if (!['opening-hour', 'active-session'].includes(hkTimeInfo.marketPhase)) {
+    return {
+      recommendations: [],
+      scanTime: new Date().toISOString(),
+      hkTime: hkTimeInfo.hkTimeStr,
+      marketPhase: hkTimeInfo.marketPhase,
+      indexChangePercent: 0,
+      totalScanned: 0,
+      stage1Candidates: 0,
+      stage2Candidates: 0,
+      stage3Candidates: 0,
+      stage4Candidates: 0,
+      thresholdSoftenerActive,
+      isDownMarket: false,
+      tradeabilityThreshold: CONFIG.tradeabilityThreshold,
+      qualifiedCandidates: 0,
+      marketClosedNotice: '美股正規交易時段以外不產生可交易短炒訊號；請待美東 09:30–16:00 再掃描。',
+    };
+  }
+
+  const capitalPerPositionUSD = capitalPlan.capitalPerPositionHKD / CONFIG.hkdToUsdRate;
+  console.log(`[US V3.7] 本金 HK$${capitalPlan.totalCapitalHKD.toFixed(0)}；每日配置 ${capitalPlan.dailyAllocationPercent.toFixed(2)}%；每筆資金 HK$${capitalPlan.capitalPerPositionHKD.toFixed(0)}（≈$${capitalPerPositionUSD.toFixed(0)} USD）`);
   if (thresholdSoftenerActive) {
     console.log(`[US V3.7] ⚠️ 降維試槍開關已啟用：利潤門檻打8折，RSI放寬至>45。`);
   }
 
-  // 獲取大市指數變幅 (Nasdaq Composite)
-  const nasdaqQuote = await yfinanceData.fetchQuote("QQQ");
-  let indexChangePercent = 0;
-  if (nasdaqQuote) {
-    indexChangePercent = nasdaqQuote.changePercent;
+  // Finnhub 對 ^IXIC 的 quote 並不穩定；失敗時以可正常報價的 QQQ 作為 Nasdaq 市場代理。
+  // 只有兩者同時不可用才採取中性背景，並明確記錄，避免把 0% 偽裝為有效的市場數據。
+  let marketBenchmark: NonNullable<ScanResult['marketBenchmark']> = '^IXIC';
+  let benchmarkQuote = await yfinanceData.fetchQuote('^IXIC', true);
+  if (!benchmarkQuote) {
+    marketBenchmark = 'QQQ';
+    console.warn('[US V3.7] ^IXIC quote 不可用；改用 QQQ 作為 Nasdaq 市場代理。');
+    benchmarkQuote = await yfinanceData.fetchQuote('QQQ', true);
   }
-  console.log(`[US V3.7] 納斯達克綜合指數 (^IXIC) 今日變幅: ${(indexChangePercent * 100).toFixed(2)}%`);
+  if (!benchmarkQuote) marketBenchmark = 'neutral-unavailable';
+  const indexChangePercent = benchmarkQuote?.changePercent ?? 0;
+  if (benchmarkQuote) {
+    console.log(`[US V3.7] 大市基準 ${marketBenchmark} 今日變幅: ${(indexChangePercent * 100).toFixed(2)}%`);
+  } else {
+    console.warn('[US V3.7] ^IXIC 與 QQQ quote 均不可用；相對強度暫以中性市場背景計算，結果應視為資料降級。');
+  }
 
-  // Step 1: Fetch all stock data in parallel (batched to avoid rate limiting)
+  const isDownMarket = indexChangePercent <= CONFIG.downMarketThreshold;
+  if (isDownMarket) {
+    console.log(`[US V3.7] ⚠️ 大市跌市模式啟動（納指${(indexChangePercent * 100).toFixed(2)}% ≤ ${(CONFIG.downMarketThreshold * 100).toFixed(2)}%），優先推介逆市抗跌股`);
+  }
+
+  // Step 1: 每隻股票的日線請求由 yfinanceData 內的 15 分鐘共用 cache、序列化佇列、
+  // 請求預算及 429 cooldown 管理；這裡保留逐一分析，避免新聞／日線資料同時爆發請求。
   const stockData = new Map<string, StockData | null>();
-  const THROTTLE_DELAY_MS = 1800; // 每隻股票之間延遲：而家多咗新聞 API 請求，加長節流避免 Rate Limit
+  const dataIssues = new Map<string, string>();
+  const historicalSources = new Map<string, HistoricalDataSource>();
 
-  for (let i = 0; i < US_STOCK_UNIVERSE.length; i++) {
-    const symbol = US_STOCK_UNIVERSE[i];
-    const result = await analyzeStock(symbol);
-    stockData.set(symbol, result);
+  const scanOrder = [...US_STOCK_UNIVERSE].sort((left, right) => {
+    const leftStatus = financeAPI.getHistoricalCacheStatus(left, '3mo');
+    const rightStatus = financeAPI.getHistoricalCacheStatus(right, '3mo');
+    // 未曾取得日線的股票優先；其次是已有 stale fallback 但無 fresh cache 的股票。
+    const leftRank = leftStatus.fresh ? 2 : leftStatus.stale ? 1 : 0;
+    const rightRank = rightStatus.fresh ? 2 : rightStatus.stale ? 1 : 0;
+    return leftRank - rightRank;
+  });
 
-    // 節流：每次請求之間加延遲，避開 Finnhub 免費版 60次/分鐘限制
-    if (i < US_STOCK_UNIVERSE.length - 1) {
-      await sleep(THROTTLE_DELAY_MS);
-    }
+  for (const symbol of scanOrder) {
+    const outcome = await analyzeStock(symbol);
+    stockData.set(symbol, outcome.data);
+    if (outcome.dataIssue) dataIssues.set(symbol, outcome.dataIssue);
+    if (outcome.historicalSource) historicalSources.set(symbol, outcome.historicalSource);
   }
-  
-  console.log(`[US V3.7] 已獲取 ${stockData.size} 隻美股數據`);
+
+  const dataReadyCount = Array.from(stockData.values()).filter((data): data is StockData => data != null).length;
+  const historySourceCount = (source: HistoricalDataSource) => Array.from(historicalSources.values()).filter((value) => value === source).length;
+  const providerHealth = financeAPI.getTwelveDataHistoryHealth();
+  const coverage: ScanCoverage = {
+    requested: US_STOCK_UNIVERSE.length,
+    ready: dataReadyCount,
+    unavailable: US_STOCK_UNIVERSE.length - dataReadyCount,
+    historyNetwork: historySourceCount('network'),
+    historyFreshCache: historySourceCount('fresh-cache'),
+    historyStaleCache: historySourceCount('stale-cache'),
+    historyCooldownOrBudget: historySourceCount('cooldown') + historySourceCount('budget-exhausted'),
+    windowRequestsUsed: providerHealth.windowRequestsUsed,
+    windowRequestBudget: providerHealth.windowRequestBudget,
+    cooldownRemainingMs: providerHealth.cooldownRemainingMs,
+  };
+  console.log(`[US V3.7] 已獲取 ${coverage.ready}/${coverage.requested} 隻美股數據；日線 fresh=${coverage.historyNetwork}、cache=${coverage.historyFreshCache}、stale=${coverage.historyStaleCache}、限流=${coverage.historyCooldownOrBudget}`);
   
   // 檢查板塊共振
   const resonanceStocks = new Set<string>();
@@ -751,11 +1306,9 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
         if (!data) continue;
         
         const { quote, volumeSpike } = data;
-        const currentPrice = quote.price;
-        const prevClose = data.candles[data.candles.length - 2]?.close || currentPrice;
-        const changePercent = ((currentPrice - prevClose) / prevClose) * 100;
+        const changePercent = quote.changePercent;
         
-        if (changePercent > 3 && volumeSpike) {
+        if (changePercent > 0.03 && volumeSpike) {
           sectorSpikesCount++;
         }
       }
@@ -770,7 +1323,8 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
   }
 
   const recommendations: V3_7Recommendation[] = [];
-  const rejectedStocks: { symbol: string; reason: string }[] = [];
+  const rejectedStocks = new Map<string, string>();
+  const recordRejected = (symbol: string, reason: string) => rejectedStocks.set(symbol, reason);
 
   let stage1CandidatesCount = 0;
   let stage2CandidatesCount = 0;
@@ -780,7 +1334,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
   for (const symbol of US_STOCK_UNIVERSE) {
     const data = stockData.get(symbol);
     if (!data) {
-      rejectedStocks.push({ symbol, reason: "No data available" });
+      recordRejected(symbol, dataIssues.get(symbol) || 'No data available');
       continue;
     }
 
@@ -792,13 +1346,14 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     if (hasBullishNews(data.news)) {
       currentStageLabel = "利好新聞爆破";
       currentTriggerReason = `利好新聞: ${data.news[0].title}`; // Use first news headline
-      recommendationResult = buildRecommendation(symbol, data, 3, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive);
+      recommendationResult = buildRecommendation(symbol, data, 3, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
+        rejectedStocks.delete(symbol);
         stage3CandidatesCount++;
         continue; // If news triggered, no need for other stages for this stock
       } else {
-        rejectedStocks.push({ symbol, reason: `Stage 3 News Failed: ${recommendationResult.debugReason}` });
+        recordRejected(symbol, `Stage 3 News Failed: ${recommendationResult.debugReason}`);
       }
     }
 
@@ -806,13 +1361,14 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
     if (hkTimeInfo.marketPhase === "opening-hour") {
       currentStageLabel = "開市動量";
       currentTriggerReason = `今日漲幅 ${(data.quote.changePercent * 100).toFixed(2)}%`;
-      recommendationResult = buildRecommendation(symbol, data, 2, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive);
+      recommendationResult = buildRecommendation(symbol, data, 2, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
+        rejectedStocks.delete(symbol);
         stage2CandidatesCount++;
         continue;
       } else {
-        rejectedStocks.push({ symbol, reason: `Stage 2 Opening Momentum Failed: ${recommendationResult.debugReason}` });
+        recordRejected(symbol, `Stage 2 Opening Momentum Failed: ${recommendationResult.debugReason}`);
       }
     }
 
@@ -821,83 +1377,88 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false)
       const sectorName = Object.keys(US_SECTORS).find(key => US_SECTORS[key].includes(symbol)) || "未知板塊";
       currentStageLabel = "玄金題材暴動";
       currentTriggerReason = `🔥【玄金題材暴動】${sectorName} 板塊資金瘋狂湧入，共振爆發！`;
-      recommendationResult = buildRecommendation(symbol, data, 1, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, true, thresholdSoftenerActive);
+      recommendationResult = buildRecommendation(symbol, data, 1, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, true, thresholdSoftenerActive, capitalPlan);
       if (recommendationResult.recommendation) {
         recommendations.push(recommendationResult.recommendation);
+        rejectedStocks.delete(symbol);
         stage1CandidatesCount++;
         continue;
       } else {
-        rejectedStocks.push({ symbol, reason: `Stage 1 Resonance Failed: ${recommendationResult.debugReason}` });
+        recordRejected(symbol, `Stage 1 Resonance Failed: ${recommendationResult.debugReason}`);
       }
     }
 
     // Stage 4: Fallback (保底防咬)
     currentStageLabel = "保底篩選";
     currentTriggerReason = "技術面覆盤";
-    recommendationResult = buildRecommendation(symbol, data, 4, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive);
+    recommendationResult = buildRecommendation(symbol, data, 4, currentStageLabel, currentTriggerReason, indexChangePercent, hkTimeInfo, resonanceStocks.has(symbol), thresholdSoftenerActive, capitalPlan);
     if (recommendationResult.recommendation) {
       recommendations.push(recommendationResult.recommendation);
+      rejectedStocks.delete(symbol);
       stage4CandidatesCount++;
     } else {
-      rejectedStocks.push({ symbol, reason: `Stage 4 Fallback Failed: ${recommendationResult.debugReason}` });
+      recordRejected(symbol, `Stage 4 Fallback Failed: ${recommendationResult.debugReason}`);
     }
   }
 
-  // Final selection: top N by expected profit (or confidence if profit is similar)
+  // 只由已通過 Tradeability Score 的候選中最多選 5 隻；少於 5 隻或 0 隻均為正常結果。
   const finalRecommendations = recommendations
-    .sort((a, b) => b.expectedProfit - a.expectedProfit || b.confidence - a.confidence)
-    .slice(0, CONFIG.positionsCount); // Target 3 stocks
+    .filter((recommendation) => recommendation.tradeabilityScore >= CONFIG.tradeabilityThreshold)
+    .sort((a, b) => {
+      if (isDownMarket) {
+        if (a.isCounterTrend && !b.isCounterTrend) return -1;
+        if (!a.isCounterTrend && b.isCounterTrend) return 1;
+      }
+      return b.tradeabilityScore - a.tradeabilityScore
+        || b.riskRewardRatio - a.riskRewardRatio
+        || b.confidence - a.confidence
+        || b.expectedProfit - a.expectedProfit;
+    })
+    .slice(0, CONFIG.positionsCount); // Target 5 stocks
   
   const elapsed = Date.now() - startTime;
   console.log(`[US V3.7] ====== 掃描完成: ${finalRecommendations.length} 隻美股在 ${elapsed}ms 內推薦 ======`);
   
   for (const rec of finalRecommendations) {
-    console.log(`[US V3.7] → ${rec.symbol} (${rec.stockName}): 階段 ${rec.stage}, 信心 ${rec.confidence}%, TP=$${rec.takeProfitPrice.toFixed(2)}, 預期利潤=$${rec.expectedProfit.toFixed(0)} USD, 可行=${rec.profitFeasible}, 原因: ${rec.triggerReason}`);
+    console.log(`[US V3.7] → ${rec.symbol} (${rec.stockName}): 階段 ${rec.stage}, 信心 ${rec.confidence}%, TP=$${rec.takeProfitPrice.toFixed(2)}, 預期利潤=$${rec.expectedProfit.toFixed(0)} USD (HK$${rec.expectedProfitHKD.toFixed(0)}), 逆市股=${rec.isCounterTrend}, 可行=${rec.profitFeasible}, 原因: ${rec.triggerReason}`);
   }
-  console.log("\n⚠️ 玄金操盤手提醒：當前戰術為【極速流】，不論是否到達 TP，香港時間 22:55 必須市價全清，絕不留戀！");
+  console.log(`\n⚠️ 短炒風險規則：每個計劃最長持有 ${CONFIG.maxHoldingMinutes} 分鐘；跌穿 initial stop 或時間到即退出。`);
+
+  const rejectionSummary = buildRejectionSummary(rejectedStocks);
+  console.log(`[US V3.7] 淘汰統計：${rejectionSummary.map((item) => `${item.label}=${item.count}`).join('；') || '無'}`);
 
   if (DEBUG_MODE) {
     console.log("\n[DEBUG] Rejected Stocks Reasons:");
-    rejectedStocks.forEach(stock => console.log(`- ${stock.symbol}: ${stock.reason}`));
+    rejectedStocks.forEach((reason, symbol) => console.log(`- ${symbol}: ${reason}`));
   }
   
-  const finalResult = {
+  const finalResult: ScanResult = {
     recommendations: finalRecommendations,
     scanTime: new Date().toISOString(),
     hkTime: hkTimeInfo.hkTimeStr,
     marketPhase: hkTimeInfo.marketPhase,
     indexChangePercent,
-    totalScanned: stockData.size,
+    marketBenchmark,
+    totalScanned: coverage.ready,
     stage1Candidates: stage1CandidatesCount,
     stage2Candidates: stage2CandidatesCount,
     stage3Candidates: stage3CandidatesCount,
     stage4Candidates: stage4CandidatesCount,
     thresholdSoftenerActive: thresholdSoftenerActive,
+    isDownMarket,
+    tradeabilityThreshold: CONFIG.tradeabilityThreshold,
+    qualifiedCandidates: recommendations.filter((recommendation) => recommendation.tradeabilityScore >= CONFIG.tradeabilityThreshold).length,
+    capitalPlan,
+    coverage,
+    rejectionSummary,
   };
 
   // 存入 Cache，15分鐘內重複請求直接返回
-  cachedScanResult = { result: finalResult, timestamp: Date.now() };
+  if (canUseCache) cachedScanResult = { result: finalResult, timestamp: Date.now() };
   console.log(`[US V3.7] 💾 掃描結果已存入 Cache，15分鐘內有效`);
 
   return finalResult;
 }
 
 // Debugging flag
-const DEBUG_MODE = true;
-
-// Example usage (for testing, not part of the main scanner logic)
-// async function main() {
-//   const result = await runUSScannerV3_7(false); // Set to true to activate threshold softener
-//   if (result.recommendations.length > 0) {
-//     console.log("\n=== 🎯 符合「玄金每手利潤 $130 美元門檻」精選名單 ===");
-//     console.log("| Symbol | Name | Price | Change % | Stage | Reason | TP | Expected Profit | Confidence |");
-//     console.log("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
-//     result.recommendations.forEach(rec => {
-//       console.log(`| ${rec.symbol} | ${rec.stockName} | ${rec.currentPrice.toFixed(2)} | ${(rec.changePercent * 100).toFixed(2)}% | ${rec.stageLabel} | ${rec.triggerReason} | ${rec.takeProfitPrice.toFixed(2)} | $${rec.expectedProfit.toFixed(0)} USD | ${rec.confidence}% |`);
-//     });
-//   } else {
-//     console.log("\n⚠️ 今日美股震盪盤整。在單注資金限制下，無任何股票能穩健達到 $130 美元利潤門檻。今日建議觀望，不夾硬開倉！");
-//   }
-// }
-
-// main();
+const DEBUG_MODE = process.env.SCANNER_DEBUG === 'true';

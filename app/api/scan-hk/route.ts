@@ -1,6 +1,6 @@
-// app/api/scan/route.ts
+// app/api/scan-hk/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { runUSScannerV3_7 } from '../../../lib/usScannerV3_7';
+import { runHKScannerV1 } from '../../../lib/hkScannerV1';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const thresholdSoftenerActive = body?.thresholdSoftenerActive === true;
     const capitalSettings = body?.capitalSettings;
-    const result = await runUSScannerV3_7(thresholdSoftenerActive, capitalSettings);
+    const result = await runHKScannerV1(thresholdSoftenerActive, capitalSettings);
     const generatedAt = new Date().toISOString();
 
     const signals = result.recommendations.map((rec) => ({
@@ -47,20 +47,17 @@ export async function POST(req: NextRequest) {
       catalystStatus: rec.catalystStatus,
       catalystSummary: rec.catalystSummary,
       catalystEvidence: rec.catalystEvidence,
-      catalystHeadline: rec.catalystHeadline,
-      catalystUrl: rec.catalystUrl,
-      upcomingEarningsDate: rec.upcomingEarningsDate,
       recommendationReasons: rec.recommendationReasons,
     }));
 
     return NextResponse.json(
       {
         success: true,
+        market: 'HK',
         signals,
-        usedSoftener: result.thresholdSoftenerActive,
-        totalScanned: result.totalScanned,
-        isDownMarket: result.isDownMarket,
         marketPhase: result.marketPhase,
+        isDownMarket: result.isDownMarket,
+        totalScanned: result.totalScanned,
         marketClosedNotice: result.marketClosedNotice || null,
         tradeabilityThreshold: result.tradeabilityThreshold,
         qualifiedCandidates: result.qualifiedCandidates,
@@ -70,9 +67,9 @@ export async function POST(req: NextRequest) {
       { headers: { 'Cache-Control': 'no-store, max-age=0' } }
     );
   } catch (error) {
-    console.error('[API/scan] Error:', error);
+    console.error('[API/scan-hk] Error:', error);
     return NextResponse.json(
-      { success: false, error: '美股掃描資料暫時不可用，系統未產生交易訊號。' },
+      { success: false, error: '港股掃描資料暫時不可用，系統未產生交易訊號。' },
       { status: 503, headers: { 'Cache-Control': 'no-store, max-age=0' } }
     );
   }
