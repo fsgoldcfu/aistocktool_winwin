@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 process.env.TWELVE_DATA_API_KEY = 'test-key';
 process.env.TWELVE_DATA_MIN_INTERVAL_MS = '0';
-delete process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW;
+process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW = '8';
 process.env.TWELVE_DATA_429_COOLDOWN_MS = '60000';
 
 const originalFetch = global.fetch;
@@ -34,11 +34,11 @@ async function main() {
 
     assert.equal(first.source, 'network', 'first uncached symbol must use one network request');
     assert.equal(repeated.source, 'fresh-cache', 'same symbol must use the 15-minute history cache');
-    assert.ok(remainingPool.every((result) => result.source === 'network'), 'default request budget must cover all 44 fixed-pool symbols');
+    assert.ok(remainingPool.every((result) => result.source === 'network'), 'an obsolete 8-request environment value must not block the 44-stock fixed pool');
     assert.equal(twelveDataCalls, 44, '44 unique symbols must consume exactly 44 provider calls');
 
     const healthAfterPool = yfinanceData.getTwelveDataHistoryHealth();
-    assert.equal(healthAfterPool.windowRequestBudget, 48, 'default budget must leave headroom above the 44-stock pool');
+    assert.equal(healthAfterPool.windowRequestBudget, 48, 'the 8-request environment value must be raised to the safe 48-request budget');
     assert.equal(healthAfterPool.windowRequestsUsed, 44, 'health must expose the full fixed-pool request count');
 
     await Promise.all(Array.from({ length: 4 }, (_, index) => yfinanceData.fetchHistoricalDataWithMeta(`HEADROOM${index}`, '3mo')));

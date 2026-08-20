@@ -11,8 +11,19 @@ const HISTORY_STALE_TTL_SECONDS = 6 * 60 * 60;
 const HISTORY_WINDOW_MS = 15 * 60 * 1000;
 // 預設必須能完成目前 44 隻固定池的一次掃描；過去的 8 個硬性預算會令 36 隻
 // 從未被分析，即使 API key 仍可正常使用。序列化間隔及 429 cooldown 仍保護 provider。
+const US_FIXED_POOL_HISTORY_REQUEST_FLOOR = 44;
+const DEFAULT_TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW = 48;
 const TWELVE_DATA_MIN_INTERVAL_MS = Math.max(0, Number(process.env.TWELVE_DATA_MIN_INTERVAL_MS ?? 1_250));
-const TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW = Math.max(1, Number(process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW ?? 48));
+const configuredHistoryRequestBudget = Number(process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW ?? DEFAULT_TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW);
+const TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW = (() => {
+  if (!Number.isFinite(configuredHistoryRequestBudget) || configuredHistoryRequestBudget < US_FIXED_POOL_HISTORY_REQUEST_FLOOR) {
+    if (process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW != null) {
+      console.warn(`[TwelveData] TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW=${process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW} cannot cover the ${US_FIXED_POOL_HISTORY_REQUEST_FLOOR}-stock US pool; enforcing ${DEFAULT_TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW}.`);
+    }
+    return DEFAULT_TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW;
+  }
+  return Math.floor(configuredHistoryRequestBudget);
+})();
 const TWELVE_DATA_429_COOLDOWN_MS = Math.max(60_000, Number(process.env.TWELVE_DATA_429_COOLDOWN_MS ?? HISTORY_WINDOW_MS));
 
 let nextTwelveDataRequestAt = 0;
