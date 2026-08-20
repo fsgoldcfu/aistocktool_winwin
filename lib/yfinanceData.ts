@@ -9,8 +9,10 @@ const TWELVE_DATA_KEY = process.env.TWELVE_DATA_API_KEY || process.env.TWELVE_DA
 const HISTORY_CACHE_TTL_SECONDS = 15 * 60;
 const HISTORY_STALE_TTL_SECONDS = 6 * 60 * 60;
 const HISTORY_WINDOW_MS = 15 * 60 * 1000;
-const TWELVE_DATA_MIN_INTERVAL_MS = Math.max(0, Number(process.env.TWELVE_DATA_MIN_INTERVAL_MS ?? 8_000));
-const TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW = Math.max(1, Number(process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW ?? 8));
+// 預設必須能完成目前 44 隻固定池的一次掃描；過去的 8 個硬性預算會令 36 隻
+// 從未被分析，即使 API key 仍可正常使用。序列化間隔及 429 cooldown 仍保護 provider。
+const TWELVE_DATA_MIN_INTERVAL_MS = Math.max(0, Number(process.env.TWELVE_DATA_MIN_INTERVAL_MS ?? 1_250));
+const TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW = Math.max(1, Number(process.env.TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW ?? 48));
 const TWELVE_DATA_429_COOLDOWN_MS = Math.max(60_000, Number(process.env.TWELVE_DATA_429_COOLDOWN_MS ?? HISTORY_WINDOW_MS));
 
 let nextTwelveDataRequestAt = 0;
@@ -154,8 +156,8 @@ async function scheduleTwelveDataHistoryRequest() {
 }
 
 /**
- * 只讓未快取的日線請求進入序列化佇列；同一 symbol/period 的 in-flight request 會共用，
- * 而 429 或預算用盡時盡量退回最後一份有效日線，避免 scanner 以不完整新資料作出推薦。
+ * 只讓未快取的日線請求進入序列化佇列；同一 symbol/period 的 in-flight request 會共用。
+ * 預設預算覆蓋整個 44 隻固定池；收到 429 後立即啟用 cooldown，並在可用時退回最後一份有效日線。
  */
 async function fetchHistoricalDataWithMeta(symbol: string, period: string = '3mo'): Promise<HistoricalDataResult> {
   const normalizedSymbol = symbol.toUpperCase();

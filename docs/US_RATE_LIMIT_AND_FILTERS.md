@@ -12,19 +12,21 @@
 |---|---:|---|
 | Fresh history cache | 15 分鐘 | 同一 symbol／期間在同一 Vercel instance 不重複下載。 |
 | Stale fallback cache | 6 小時 | 收到 429、預算用盡或短暫網路問題時，只使用最後一份有效日線，不把缺資料當作合格訊號。 |
-| Twelve Data 歷史請求最小間隔 | 8,000 ms | 未快取請求會單一排隊，不會平行爆發。 |
-| 每 15 分鐘歷史請求預算 | 8 | 保護低額度 provider；未取到的股票會標記資料不足，而不會再打 API。 |
+| Twelve Data 歷史請求最小間隔 | 1,250 ms | 未快取請求會單一排隊，不會平行爆發。 |
+| 每 15 分鐘歷史請求預算 | 48 | 預設覆蓋 44 隻固定池；實際 429 才會啟動 cooldown，而非預先阻止大部分股票。 |
 | HTTP 429 cooldown | 15 分鐘 | provider 回傳 429 後暫停新日線請求；有 stale 日線才 fallback，否則跳過該股。 |
 
 以下 environment variables 可在 Vercel 設定。除非已確認 Twelve Data plan 的實際限制，請保留預設值：
 
 ```text
-TWELVE_DATA_MIN_INTERVAL_MS=8000
-TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW=8
+TWELVE_DATA_MIN_INTERVAL_MS=1250
+TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW=48
 TWELVE_DATA_429_COOLDOWN_MS=900000
 ```
 
 這些保護是 Vercel function instance 內的記憶體快取；serverless cold start 後不保證仍然存在。因此它是減少重複請求和防止 429 的保護，不是持久資料庫。若要在所有 cold start 都維持完整 44 隻日線，下一階段應將已收市日線每日一次同步到 Supabase 或部署靜態資料檔。
+
+> **重要：** 已存在的 Vercel environment variable 會覆蓋程式預設。因此若目前仍設定 `TWELVE_DATA_MAX_HISTORY_REQUESTS_PER_WINDOW=8` 或 `TWELVE_DATA_MIN_INTERVAL_MS=8000`，必須在 Vercel 改為上列數值（或刪除兩者以使用程式預設），否則更新程式後仍會只分析 8 隻股票。
 
 ## 今日心水的新統計
 

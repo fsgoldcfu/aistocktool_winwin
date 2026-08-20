@@ -38,6 +38,7 @@ type TodayPicksData = {
   scanner?: {
     coverage?: ScanCoverage | null;
     rejectionSummary?: RejectionSummaryItem[];
+    marketBenchmark?: '^IXIC' | 'QQQ' | 'neutral-unavailable' | null;
   };
 };
 
@@ -64,6 +65,7 @@ export function TodayPicksPanel({ capitalSettings }: { capitalSettings: UserCapi
   const picks = data?.recommendations || [];
   const coverage = data?.scanner?.coverage;
   const rejectionSummary = data?.scanner?.rejectionSummary || [];
+  const marketBenchmark = data?.scanner?.marketBenchmark;
   const cooldownMinutes = coverage?.cooldownRemainingMs ? Math.ceil(coverage.cooldownRemainingMs / 60_000) : 0;
   return (
     <section className="mb-6 rounded-2xl border border-amber-400/25 bg-gradient-to-br from-amber-500/10 to-[#0d1224] p-5">
@@ -86,6 +88,8 @@ export function TodayPicksPanel({ capitalSettings }: { capitalSettings: UserCapi
       {coverage && <div className="mb-3 rounded-xl border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-slate-300">
         <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-semibold text-sky-200">美股資料覆蓋率</span><span>{coverage.ready}/{coverage.requested} 隻可完成分析</span></div>
         <p className="mt-1 text-slate-400">日線：本輪新取 {coverage.historyNetwork}、15 分鐘快取 {coverage.historyFreshCache}、舊快取 fallback {coverage.historyStaleCache}、限流／預算暫停 {coverage.historyCooldownOrBudget}。本 15 分鐘窗口已使用 {coverage.windowRequestsUsed}/{coverage.windowRequestBudget} 個歷史資料請求。</p>
+        {marketBenchmark === 'QQQ' && <p className="mt-1 text-amber-200">市場背景：^IXIC 即時報價不可用，已改用 QQQ 作 Nasdaq 市場代理。</p>}
+        {marketBenchmark === 'neutral-unavailable' && <p className="mt-1 text-red-300">市場背景：^IXIC 與 QQQ 即時報價皆不可用；相對強度暫以中性背景計算，請勿把此結果視為完整市場確認。</p>}
         {cooldownMinutes > 0 && <p className="mt-1 text-amber-300">資料供應商正處於 cooldown，約 {cooldownMinutes} 分鐘後才會再嘗試未取得資料的股票。</p>}
       </div>}
       {data && picks.length === 0 && <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-slate-400"><Clock className="w-4 h-4" />暫時沒有合格訊號；系統不會為湊數而顯示交易建議。</div>}

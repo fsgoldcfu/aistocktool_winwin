@@ -82,6 +82,7 @@ export async function runTodayPicks(thresholdSoftenerActive = false, capitalSett
       tradeabilityThreshold: us?.tradeabilityThreshold ?? null,
       qualifiedCandidates: us?.qualifiedCandidates ?? 0,
       marketPhase: us?.marketPhase ?? 'data-unavailable',
+      marketBenchmark: us?.marketBenchmark ?? null,
       capitalPlan: us?.capitalPlan || buildCapitalPlan(capitalSettings),
       coverage: us?.coverage ?? null,
       rejectionSummary: us?.rejectionSummary ?? [],

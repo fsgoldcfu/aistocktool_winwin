@@ -45,12 +45,12 @@ interface NewsItem {
 }
 
 class YFinanceData {
-  async fetchQuote(symbol: string): Promise<Quote | null> {
+  async fetchQuote(symbol: string, suppressErrorLog = false): Promise<Quote | null> {
     try {
       const q = await financeAPI.fetchQuote(symbol);
       return { price: q.price, change: q.change, changePercent: q.changePercent };
     } catch (error) {
-      console.error(`[US Scanner] fetchQuote failed for ${symbol}:`, error);
+      if (!suppressErrorLog) console.error(`[US Scanner] fetchQuote failed for ${symbol}:`, error);
       return null;
     }
   }
@@ -278,6 +278,7 @@ export interface ScanResult {
   hkTime: string;
   marketPhase: string;
   indexChangePercent: number;
+  marketBenchmark?: '^IXIC' | 'QQQ' | 'neutral-unavailable';
   totalScanned: number;
   stage1Candidates: number;
   stage2Candidates: number;
@@ -1230,13 +1231,22 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
     console.log(`[US V3.7] ⚠️ 降維試槍開關已啟用：利潤門檻打8折，RSI放寬至>45。`);
   }
 
-  // 獲取大市指數變幅 (Nasdaq Composite)
-  const nasdaqQuote = await yfinanceData.fetchQuote("^IXIC");
-  let indexChangePercent = 0;
-  if (nasdaqQuote) {
-    indexChangePercent = nasdaqQuote.changePercent;
+  // Finnhub 對 ^IXIC 的 quote 並不穩定；失敗時以可正常報價的 QQQ 作為 Nasdaq 市場代理。
+  // 只有兩者同時不可用才採取中性背景，並明確記錄，避免把 0% 偽裝為有效的市場數據。
+  let marketBenchmark: NonNullable<ScanResult['marketBenchmark']> = '^IXIC';
+  let benchmarkQuote = await yfinanceData.fetchQuote('^IXIC', true);
+  if (!benchmarkQuote) {
+    marketBenchmark = 'QQQ';
+    console.warn('[US V3.7] ^IXIC quote 不可用；改用 QQQ 作為 Nasdaq 市場代理。');
+    benchmarkQuote = await yfinanceData.fetchQuote('QQQ', true);
   }
-  console.log(`[US V3.7] 納斯達克綜合指數 (^IXIC) 今日變幅: ${(indexChangePercent * 100).toFixed(2)}%`);
+  if (!benchmarkQuote) marketBenchmark = 'neutral-unavailable';
+  const indexChangePercent = benchmarkQuote?.changePercent ?? 0;
+  if (benchmarkQuote) {
+    console.log(`[US V3.7] 大市基準 ${marketBenchmark} 今日變幅: ${(indexChangePercent * 100).toFixed(2)}%`);
+  } else {
+    console.warn('[US V3.7] ^IXIC 與 QQQ quote 均不可用；相對強度暫以中性市場背景計算，結果應視為資料降級。');
+  }
 
   const isDownMarket = indexChangePercent <= CONFIG.downMarketThreshold;
   if (isDownMarket) {
@@ -1428,6 +1438,7 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
     hkTime: hkTimeInfo.hkTimeStr,
     marketPhase: hkTimeInfo.marketPhase,
     indexChangePercent,
+    marketBenchmark,
     totalScanned: coverage.ready,
     stage1Candidates: stage1CandidatesCount,
     stage2Candidates: stage2CandidatesCount,
