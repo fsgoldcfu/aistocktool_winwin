@@ -1,0 +1,40 @@
+name: Prewarm US Daily History Cache
+
+on:
+  schedule:
+    # US 收市後；即使 GitHub cron 略有延遲，日線已收市，不影響下一美股交易日前的快取完整性。
+    - cron: '5 22 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prewarm:
+    name: Prewarm 44-symbol daily history
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trigger controlled history batches
+        env:
+          US_HISTORY_PREWARM_URL: ${{ secrets.US_HISTORY_PREWARM_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "${US_HISTORY_PREWARM_URL}"
+          test -n "${CRON_SECRET}"
+
+          for batch in 0 1 2 3 4 5 6 7; do
+            echo "Starting US history prewarm batch ${batch}/7"
+            response_file="$(mktemp)"
+            status="$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${CRON_SECRET}" \
+              "${US_HISTORY_PREWARM_URL}?batch=${batch}")"
+            cat "$response_file"
+            rm -f "$response_file"
+            test "$status" = "200"
+
+            if [ "$batch" -lt 7 ]; then
+              sleep 70
+            fi
+          done

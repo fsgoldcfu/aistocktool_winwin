@@ -32,6 +32,20 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
   cancelled: { label: '已取消', color: 'text-red-400' },
 };
 
+interface UsScanCoverage {
+  requested: number;
+  quoteReady: number;
+  ready: number;
+  analysisMode: 'persistent-full' | 'quote-fallback';
+  persistentHistoryFresh: number;
+  fallbackDetailedCandidates: number;
+  historyProviderCooldown: number;
+  historyLocalBudget: number;
+  historyErrors: number;
+  persistenceAvailable: boolean;
+  persistenceError?: string;
+}
+
 interface SignalWithStages extends StockSignal {
   stage1?: { passed: boolean; label: string; detail: string };
   stage2?: { passed: boolean; label: string; detail: string };
@@ -191,7 +205,7 @@ export default function DashboardPage() {
   const [signals, setSignals] = useState<SignalWithStages[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
-  const [scanInfo, setScanInfo] = useState<{ usedSoftener: boolean; nearMissCount: number; tradeabilityThreshold?: number; qualifiedCandidates?: number } | null>(null);
+  const [scanInfo, setScanInfo] = useState<{ usedSoftener: boolean; nearMissCount: number; tradeabilityThreshold?: number; qualifiedCandidates?: number; coverage?: UsScanCoverage | null } | null>(null);
   const [marketClosedNotice, setMarketClosedNotice] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'active' | 'closed'>('active');
   const [market, setMarket] = useState<Market>('US');
@@ -241,7 +255,7 @@ export default function DashboardPage() {
       if (!response.ok) throw new Error(data.error || 'Scan failed');
       if (data.success && data.signals) {
         setSignals(data.signals);
-        setScanInfo({ usedSoftener: data.usedSoftener || false, nearMissCount: data.nearMissCount || 0, tradeabilityThreshold: data.tradeabilityThreshold, qualifiedCandidates: data.qualifiedCandidates });
+        setScanInfo({ usedSoftener: data.usedSoftener || false, nearMissCount: data.nearMissCount || 0, tradeabilityThreshold: data.tradeabilityThreshold, qualifiedCandidates: data.qualifiedCandidates, coverage: data.coverage || null });
         if (data.marketClosedNotice) setMarketClosedNotice(data.marketClosedNotice);
       }
     } catch (err) {
@@ -467,8 +481,18 @@ export default function DashboardPage() {
             </div>
 
             {scanInfo?.tradeabilityThreshold != null && (
-              <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 mb-6 text-slate-300 text-xs">
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 mb-3 text-slate-300 text-xs">
                 今日 Tradeability Score 門檻：<span className="text-blue-300 font-bold">{scanInfo.tradeabilityThreshold}</span>；合格候選：<span className="text-blue-300 font-bold">{scanInfo.qualifiedCandidates ?? 0}</span> 隻。系統最多顯示 5 隻，未達門檻時可以少於 5 隻或零隻。
+              </div>
+            )}
+            {market === 'US' && scanInfo?.coverage && (
+              <div className={`border rounded-xl px-4 py-3 mb-6 text-xs ${scanInfo.coverage.analysisMode === 'persistent-full' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-100' : 'bg-amber-500/10 border-amber-500/20 text-amber-100'}`}>
+                {scanInfo.coverage.analysisMode === 'persistent-full' ? (
+                  <p>資料覆蓋：即時報價 <strong>{scanInfo.coverage.quoteReady}/{scanInfo.coverage.requested}</strong>；已用持久日線詳析 <strong>{scanInfo.coverage.ready}/{scanInfo.coverage.requested}</strong>。零推介代表已完成完整資料分析後未達規則。</p>
+                ) : (
+                  <p>資料預熱中：即時報價已覆蓋 <strong>{scanInfo.coverage.quoteReady}/{scanInfo.coverage.requested}</strong>；持久日線 <strong>{scanInfo.coverage.persistentHistoryFresh}/{scanInfo.coverage.requested}</strong>，暫只詳析相對最強 <strong>{scanInfo.coverage.fallbackDetailedCandidates}</strong> 隻。現時零推介不代表其餘股票已完成日線分析。</p>
+                )}
+                {(scanInfo.coverage.historyProviderCooldown > 0 || scanInfo.coverage.historyLocalBudget > 0 || scanInfo.coverage.historyErrors > 0) && <p className="mt-1 opacity-80">日線供應商狀態：429/cooldown={scanInfo.coverage.historyProviderCooldown}；本地預算={scanInfo.coverage.historyLocalBudget}；資料錯誤={scanInfo.coverage.historyErrors}。</p>}
               </div>
             )}
 

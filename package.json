@@ -11,6 +11,7 @@
     "verify:index-analysis": "npx tsx scripts/verify-index-analysis.ts",
     "verify:today-picks": "npx tsx scripts/verify-today-picks.ts",
     "verify:us-history-cache": "npx tsx scripts/verify-us-history-cache.ts",
+    "verify:us-quote-fallback": "npx tsx scripts/verify-us-quote-fallback.ts",
     "verify:capital-settings": "npx tsx scripts/verify-capital-settings.ts",
     "verify:short-term-risk": "npx tsx scripts/verify-short-term-risk.ts",
     "verify:catalysts": "npx tsx scripts/verify-catalyst-analysis.ts",

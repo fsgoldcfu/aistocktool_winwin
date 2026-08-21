@@ -65,6 +65,9 @@ export async function POST(req: NextRequest) {
         tradeabilityThreshold: result.tradeabilityThreshold,
         qualifiedCandidates: result.qualifiedCandidates,
         capitalPlan: result.capitalPlan || null,
+        coverage: result.coverage || null,
+        rejectionSummary: result.rejectionSummary || [],
+        marketBenchmark: result.marketBenchmark || null,
         generatedAt,
       },
       { headers: { 'Cache-Control': 'no-store, max-age=0' } }

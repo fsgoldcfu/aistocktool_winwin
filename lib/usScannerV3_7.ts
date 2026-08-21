@@ -20,6 +20,7 @@ import { yfinanceData as financeAPI, type HistoricalDataSource } from "./yfinanc
 import { buildLongIntradayRiskPlan, calculateTradeabilityScore, evaluateFutuUsStockNetProfit } from './shortTermRisk';
 import { assessCatalyst, type CatalystAssessment, type EarningsEvidence } from './catalystAnalysis';
 import { buildCapitalPlan, type CapitalPlan, type CapitalSettingsInput } from './capitalSettings';
+import { readUsDailyHistoryCache } from './usHistoryPersistence';
 
 // ==================== 掃描結果 Cache（15分鐘） ====================
 let cachedScanResult: { result: any; timestamp: number } | null = null;
@@ -29,8 +30,21 @@ interface Candle {
   date: string; open: number; high: number; low: number; close: number; volume: number;
 }
 
-interface Quote {
+export interface Quote {
   price: number; change: number; changePercent: number;
+}
+
+export const US_QUOTE_FALLBACK_DETAIL_LIMIT = 6;
+
+export function selectQuoteFallbackSymbols(liveQuotes: ReadonlyMap<string, Quote>, indexChangePercent: number, limit: number = US_QUOTE_FALLBACK_DETAIL_LIMIT): string[] {
+  return Array.from(liveQuotes.entries())
+    .sort((left, right) => {
+      const leftRelativeStrength = left[1].changePercent - indexChangePercent;
+      const rightRelativeStrength = right[1].changePercent - indexChangePercent;
+      return rightRelativeStrength - leftRelativeStrength || right[1].changePercent - left[1].changePercent || left[0].localeCompare(right[0]);
+    })
+    .slice(0, Math.max(0, limit))
+    .map(([symbol]) => symbol);
 }
 
 interface Indicators {
@@ -144,7 +158,7 @@ const US_SECTORS: Record<string, string[]> = {
   "國防與能源基建": ["RTX", "GD", "VRT"],
 };
 
-const US_STOCK_UNIVERSE: string[] = Array.from(new Set(Object.values(US_SECTORS).flat()));
+export const US_STOCK_UNIVERSE: string[] = Array.from(new Set(Object.values(US_SECTORS).flat()));
 
 const US_STOCK_NAMES: Record<string, string> = {
   // AI半導體
@@ -241,6 +255,7 @@ export interface V3_7Recommendation {
 }
 
 export type RejectionCode =
+  | 'quote_prescreen_only'
   | 'data_unavailable'
   | 'catalyst_risk'
   | 'late_session'
@@ -261,15 +276,26 @@ export interface RejectionSummaryItem {
 
 export interface ScanCoverage {
   requested: number;
+  /** 已成功獲取即時報價的股票數，正常為 44。 */
+  quoteReady: number;
+  /** 取得完整日線、新聞與風險計劃詳析的股票數。 */
   ready: number;
   unavailable: number;
+  analysisMode: 'persistent-full' | 'quote-fallback';
+  persistentHistoryFresh: number;
+  fallbackDetailedCandidates: number;
+  historyPersistentCache: number;
   historyNetwork: number;
   historyFreshCache: number;
   historyStaleCache: number;
-  historyCooldownOrBudget: number;
+  historyProviderCooldown: number;
+  historyLocalBudget: number;
+  historyErrors: number;
   windowRequestsUsed: number;
   windowRequestBudget: number;
   cooldownRemainingMs: number;
+  persistenceAvailable: boolean;
+  persistenceError?: string;
 }
 
 export interface ScanResult {
@@ -826,7 +852,7 @@ interface StockAnalysisResult {
   historicalSource?: HistoricalDataSource;
 }
 
-async function analyzeStock(symbol: string): Promise<StockAnalysisResult> {
+async function analyzeStock(symbol: string, prefetchedQuote?: Quote | null, loadNews: boolean = true): Promise<StockAnalysisResult> {
   try {
     // 先確認日線是否可用；當 Twelve Data 預算／cooldown 阻擋新股票時，
     // 不再額外對該股票發送 Finnhub quote 或 news 請求。
@@ -836,13 +862,17 @@ async function analyzeStock(symbol: string): Promise<StockAnalysisResult> {
       return { data: null, dataIssue: `history_${history.source}`, historicalSource: history.source };
     }
 
-    const quote = await yfinanceData.fetchQuote(symbol);
+    const quote = prefetchedQuote ?? await yfinanceData.fetchQuote(symbol);
     if (!quote || quote.price <= 0) {
       return { data: null, dataIssue: 'quote_unavailable', historicalSource: history.source };
     }
     
     const indicators = yfinanceData.calculateIndicators(candles);
-    const [news, earnings] = await Promise.all([getUSStockNews(symbol), getUSEarningsEvents(symbol)]);
+    // 所有詳析候選都檢查業績風險；只有最強 quote 候選再取公司新聞，避免 44 隻同時耗盡 Finnhub 額度。
+    const [news, earnings] = await Promise.all([
+      loadNews ? getUSStockNews(symbol) : Promise.resolve([] as NewsItem[]),
+      getUSEarningsEvents(symbol),
+    ]);
     const catalyst = selectCatalyst(symbol, news, earnings);
 
     const todayVolume = candles[candles.length - 1]?.volume || 0;
@@ -872,7 +902,8 @@ async function analyzeStock(symbol: string): Promise<StockAnalysisResult> {
 }
 
 const REJECTION_LABELS: Record<RejectionCode, string> = {
-  data_unavailable: '資料不足／供應商限流',
+  quote_prescreen_only: '日線快取未完成；已做即時報價預篩但未進入詳析候選',
+  data_unavailable: '日線或報價資料不足',
   catalyst_risk: '業績或事件風險',
   late_session: '尾市動能不足',
   relative_strength: '相對強度不足或非上升',
@@ -886,6 +917,7 @@ const REJECTION_LABELS: Record<RejectionCode, string> = {
 };
 
 function classifyRejection(reason: string): RejectionCode {
+  if (/quote_screen_only/i.test(reason)) return 'quote_prescreen_only';
   if (/No data available|quote_unavailable|history_|資料不足|限流|cooldown/i.test(reason)) return 'data_unavailable';
   if (/事件風險|業績|catalyst/i.test(reason)) return 'catalyst_risk';
   if (/Late Session/i.test(reason)) return 'late_session';
@@ -1253,23 +1285,47 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
     console.log(`[US V3.7] ⚠️ 大市跌市模式啟動（納指${(indexChangePercent * 100).toFixed(2)}% ≤ ${(CONFIG.downMarketThreshold * 100).toFixed(2)}%），優先推介逆市抗跌股`);
   }
 
-  // Step 1: 每隻股票的日線請求由 yfinanceData 內的 15 分鐘共用 cache、序列化佇列、
-  // 請求預算及 429 cooldown 管理；這裡保留逐一分析，避免新聞／日線資料同時爆發請求。
+  // Step 1: 先從 server-only Supabase 持久快取載入 44 隻已收市日線。
+  // 若快取未完成，仍先取得 44 隻 Finnhub 即時 quote，再只以有限 Twelve Data credits 詳析最強 6 隻。
+  const persistedHistory = await readUsDailyHistoryCache(US_STOCK_UNIVERSE);
+  for (const record of persistedHistory.records) {
+    financeAPI.hydratePersistentHistory(record.symbol, record.candles, record.period);
+  }
+
   const stockData = new Map<string, StockData | null>();
   const dataIssues = new Map<string, string>();
   const historicalSources = new Map<string, HistoricalDataSource>();
+  const liveQuotes = new Map<string, Quote>();
 
-  const scanOrder = [...US_STOCK_UNIVERSE].sort((left, right) => {
-    const leftStatus = financeAPI.getHistoricalCacheStatus(left, '3mo');
-    const rightStatus = financeAPI.getHistoricalCacheStatus(right, '3mo');
-    // 未曾取得日線的股票優先；其次是已有 stale fallback 但無 fresh cache 的股票。
-    const leftRank = leftStatus.fresh ? 2 : leftStatus.stale ? 1 : 0;
-    const rightRank = rightStatus.fresh ? 2 : rightStatus.stale ? 1 : 0;
-    return leftRank - rightRank;
-  });
+  // Finnhub quote 是 A fallback 的完整 universe coverage；輕微序列化避免 burst rate limit。
+  for (const symbol of US_STOCK_UNIVERSE) {
+    const quote = await yfinanceData.fetchQuote(symbol);
+    if (quote) liveQuotes.set(symbol, quote);
+    else dataIssues.set(symbol, 'quote_unavailable');
+    await sleep(90);
+  }
 
-  for (const symbol of scanOrder) {
-    const outcome = await analyzeStock(symbol);
+  const fullPersistentCoverage = persistedHistory.freshSymbols.length === US_STOCK_UNIVERSE.length;
+  const analysisSymbols = fullPersistentCoverage
+    ? US_STOCK_UNIVERSE.filter((symbol) => liveQuotes.has(symbol))
+    : selectQuoteFallbackSymbols(liveQuotes, indexChangePercent);
+
+  if (!fullPersistentCoverage) {
+    console.warn(`[US V3.7] 日線持久快取未完整（fresh=${persistedHistory.freshSymbols.length}/${US_STOCK_UNIVERSE.length}）；A fallback 已完成 quote ${liveQuotes.size}/${US_STOCK_UNIVERSE.length} 覆蓋，僅詳析相對最強 ${analysisSymbols.length} 隻。`);
+    for (const symbol of US_STOCK_UNIVERSE) {
+      if (!analysisSymbols.includes(symbol) && liveQuotes.has(symbol)) dataIssues.set(symbol, 'quote_screen_only');
+    }
+  }
+
+  const newsPrioritySymbols = new Set(
+    Array.from(liveQuotes.entries())
+      .sort((left, right) => (right[1].changePercent - indexChangePercent) - (left[1].changePercent - indexChangePercent))
+      .slice(0, 12)
+      .map(([symbol]) => symbol),
+  );
+
+  for (const symbol of analysisSymbols) {
+    const outcome = await analyzeStock(symbol, liveQuotes.get(symbol) ?? null, newsPrioritySymbols.has(symbol));
     stockData.set(symbol, outcome.data);
     if (outcome.dataIssue) dataIssues.set(symbol, outcome.dataIssue);
     if (outcome.historicalSource) historicalSources.set(symbol, outcome.historicalSource);
@@ -1280,17 +1336,26 @@ export async function runUSScannerV3_7(thresholdSoftenerActive: boolean = false,
   const providerHealth = financeAPI.getTwelveDataHistoryHealth();
   const coverage: ScanCoverage = {
     requested: US_STOCK_UNIVERSE.length,
+    quoteReady: liveQuotes.size,
     ready: dataReadyCount,
     unavailable: US_STOCK_UNIVERSE.length - dataReadyCount,
+    analysisMode: fullPersistentCoverage ? 'persistent-full' : 'quote-fallback',
+    persistentHistoryFresh: persistedHistory.freshSymbols.length,
+    fallbackDetailedCandidates: fullPersistentCoverage ? 0 : analysisSymbols.length,
+    historyPersistentCache: historySourceCount('persistent-cache'),
     historyNetwork: historySourceCount('network'),
     historyFreshCache: historySourceCount('fresh-cache'),
     historyStaleCache: historySourceCount('stale-cache'),
-    historyCooldownOrBudget: historySourceCount('cooldown') + historySourceCount('budget-exhausted'),
+    historyProviderCooldown: historySourceCount('cooldown'),
+    historyLocalBudget: historySourceCount('budget-exhausted'),
+    historyErrors: historySourceCount('error'),
     windowRequestsUsed: providerHealth.windowRequestsUsed,
     windowRequestBudget: providerHealth.windowRequestBudget,
     cooldownRemainingMs: providerHealth.cooldownRemainingMs,
+    persistenceAvailable: persistedHistory.persistenceAvailable,
+    persistenceError: persistedHistory.error,
   };
-  console.log(`[US V3.7] 已獲取 ${coverage.ready}/${coverage.requested} 隻美股數據；日線 fresh=${coverage.historyNetwork}、cache=${coverage.historyFreshCache}、stale=${coverage.historyStaleCache}、限流=${coverage.historyCooldownOrBudget}`);
+  console.log(`[US V3.7] 資料覆蓋：quote=${coverage.quoteReady}/${coverage.requested}；日線詳析=${coverage.ready}/${coverage.requested}；模式=${coverage.analysisMode}；持久快取=${coverage.historyPersistentCache}；network=${coverage.historyNetwork}；供應商429/cooldown=${coverage.historyProviderCooldown}；本地預算=${coverage.historyLocalBudget}；錯誤=${coverage.historyErrors}`);
   
   // 檢查板塊共振
   const resonanceStocks = new Set<string>();

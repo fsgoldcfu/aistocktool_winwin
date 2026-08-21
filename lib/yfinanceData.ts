@@ -54,7 +54,7 @@ export interface CandleData {
   volume: number;
 }
 
-export type HistoricalDataSource = 'fresh-cache' | 'network' | 'stale-cache' | 'cooldown' | 'budget-exhausted' | 'error';
+export type HistoricalDataSource = 'persistent-cache' | 'fresh-cache' | 'network' | 'stale-cache' | 'cooldown' | 'budget-exhausted' | 'error';
 
 export interface HistoricalDataResult {
   candles: CandleData[];
@@ -174,7 +174,10 @@ async function fetchHistoricalDataWithMeta(symbol: string, period: string = '3mo
   const normalizedSymbol = symbol.toUpperCase();
   const cacheKey = historyCacheKey(normalizedSymbol, period);
   const cached = cache.get(cacheKey) as CandleData[] | undefined;
-  if (cached) return { candles: cached, source: 'fresh-cache' };
+  if (cached) {
+    const isPersistent = Boolean(cache.get(`history_persistent_${normalizedSymbol}_${period}`));
+    return { candles: cached, source: isPersistent ? 'persistent-cache' : 'fresh-cache' };
+  }
 
   const inFlight = historyInFlight.get(cacheKey);
   if (inFlight) return inFlight;
@@ -319,10 +322,25 @@ function calculateIndicators(candles: CandleData[]): IndicatorData {
   };
 }
 
+export function hydratePersistentHistory(symbol: string, candles: CandleData[], period: string = '3mo') {
+  const normalizedSymbol = symbol.toUpperCase();
+  const normalizedCandles = normalizeCandles(candles);
+  cache.set(historyCacheKey(normalizedSymbol, period), normalizedCandles, HISTORY_CACHE_TTL_SECONDS);
+  cache.set(`history_stale_${normalizedSymbol}_${period}`, normalizedCandles, HISTORY_STALE_TTL_SECONDS);
+  cache.set(`history_persistent_${normalizedSymbol}_${period}`, true, HISTORY_CACHE_TTL_SECONDS);
+}
+
+export function invalidateFreshHistoryCache(symbol: string, period: string = '3mo') {
+  const normalizedSymbol = symbol.toUpperCase();
+  cache.del(historyCacheKey(normalizedSymbol, period));
+  cache.del(`history_persistent_${normalizedSymbol}_${period}`);
+}
+
 export function getHistoricalCacheStatus(symbol: string, period: string = '3mo') {
   const normalizedSymbol = symbol.toUpperCase();
   return {
     fresh: Boolean(cache.get(historyCacheKey(normalizedSymbol, period))),
+    persistent: Boolean(cache.get(`history_persistent_${normalizedSymbol}_${period}`)),
     stale: Boolean(readStaleHistory(normalizedSymbol, period)),
   };
 }
@@ -337,4 +355,4 @@ export function getTwelveDataHistoryHealth() {
   };
 }
 
-export const yfinanceData = { fetchQuote, fetchHistoricalData, fetchHistoricalDataWithMeta, calculateIndicators, sleep, getHistoricalCacheStatus, getTwelveDataHistoryHealth };
+export const yfinanceData = { fetchQuote, fetchHistoricalData, fetchHistoricalDataWithMeta, calculateIndicators, sleep, hydratePersistentHistory, invalidateFreshHistoryCache, getHistoricalCacheStatus, getTwelveDataHistoryHealth };

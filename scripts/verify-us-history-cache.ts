@@ -37,6 +37,18 @@ async function main() {
     assert.ok(remainingPool.every((result) => result.source === 'network'), 'an obsolete 8-request environment value must not block the 44-stock fixed pool');
     assert.equal(twelveDataCalls, 44, '44 unique symbols must consume exactly 44 provider calls');
 
+    yfinanceData.hydratePersistentHistory('PERSIST', dailyValues().map((value) => ({
+      date: value.datetime,
+      open: Number(value.open),
+      high: Number(value.high),
+      low: Number(value.low),
+      close: Number(value.close),
+      volume: Number(value.volume),
+    })), '3mo');
+    const persistent = await yfinanceData.fetchHistoricalDataWithMeta('PERSIST', '3mo');
+    assert.equal(persistent.source, 'persistent-cache', 'hydrated Supabase daily history must be identifiable and must not call Twelve Data');
+    assert.equal(twelveDataCalls, 44, 'hydrating persistent history must not consume provider credit');
+
     const healthAfterPool = yfinanceData.getTwelveDataHistoryHealth();
     assert.equal(healthAfterPool.windowRequestBudget, 48, 'the 8-request environment value must be raised to the safe 48-request budget');
     assert.equal(healthAfterPool.windowRequestsUsed, 44, 'health must expose the full fixed-pool request count');

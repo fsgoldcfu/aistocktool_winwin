@@ -17,15 +17,24 @@ type TodayPick = {
 
 type ScanCoverage = {
   requested: number;
+  quoteReady: number;
   ready: number;
   unavailable: number;
+  analysisMode: 'persistent-full' | 'quote-fallback';
+  persistentHistoryFresh: number;
+  fallbackDetailedCandidates: number;
+  historyPersistentCache: number;
   historyNetwork: number;
   historyFreshCache: number;
   historyStaleCache: number;
-  historyCooldownOrBudget: number;
+  historyProviderCooldown: number;
+  historyLocalBudget: number;
+  historyErrors: number;
   windowRequestsUsed: number;
   windowRequestBudget: number;
   cooldownRemainingMs: number;
+  persistenceAvailable: boolean;
+  persistenceError?: string;
 };
 
 type RejectionSummaryItem = { code: string; label: string; count: number };
@@ -85,12 +94,18 @@ export function TodayPicksPanel({ capitalSettings }: { capitalSettings: UserCapi
 
       {error && <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-300">{error}</p>}
       {data && <p className="mb-3 text-sm text-slate-300">{data.title}。{data.notice || '資料已按現時段更新。'}</p>}
-      {coverage && <div className="mb-3 rounded-xl border border-sky-400/20 bg-sky-500/5 p-3 text-xs text-slate-300">
-        <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-semibold text-sky-200">美股資料覆蓋率</span><span>{coverage.ready}/{coverage.requested} 隻可完成分析</span></div>
-        <p className="mt-1 text-slate-400">日線：本輪新取 {coverage.historyNetwork}、15 分鐘快取 {coverage.historyFreshCache}、舊快取 fallback {coverage.historyStaleCache}、限流／預算暫停 {coverage.historyCooldownOrBudget}。本 15 分鐘窗口已使用 {coverage.windowRequestsUsed}/{coverage.windowRequestBudget} 個歷史資料請求。</p>
+      {coverage && <div className={`mb-3 rounded-xl border p-3 text-xs ${coverage.analysisMode === 'persistent-full' ? 'border-emerald-400/20 bg-emerald-500/5 text-emerald-100' : 'border-amber-400/20 bg-amber-500/5 text-amber-100'}`}>
+        <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-semibold">美股資料覆蓋率</span><span>即時報價 {coverage.quoteReady}/{coverage.requested}</span></div>
+        {coverage.analysisMode === 'persistent-full' ? (
+          <p className="mt-1 opacity-85">日線持久快取完整，已詳析 {coverage.ready}/{coverage.requested} 隻；零推介才代表完整規則下沒有合格訊號。</p>
+        ) : (
+          <p className="mt-1 opacity-85">日線預熱未完成（持久快取 {coverage.persistentHistoryFresh}/{coverage.requested}），已以 44 quote 預篩，暫只詳析相對最強 {coverage.fallbackDetailedCandidates} 隻。零推介不代表其餘股票已完成日線分析。</p>
+        )}
+        <p className="mt-1 opacity-75">日線來源：持久快取 {coverage.historyPersistentCache}、本輪新取 {coverage.historyNetwork}、記憶快取 {coverage.historyFreshCache}、舊資料 fallback {coverage.historyStaleCache}；供應商 429/cooldown {coverage.historyProviderCooldown}、本地預算 {coverage.historyLocalBudget}、資料錯誤 {coverage.historyErrors}。</p>
         {marketBenchmark === 'QQQ' && <p className="mt-1 text-amber-200">市場背景：^IXIC 即時報價不可用，已改用 QQQ 作 Nasdaq 市場代理。</p>}
         {marketBenchmark === 'neutral-unavailable' && <p className="mt-1 text-red-300">市場背景：^IXIC 與 QQQ 即時報價皆不可用；相對強度暫以中性背景計算，請勿把此結果視為完整市場確認。</p>}
         {cooldownMinutes > 0 && <p className="mt-1 text-amber-300">資料供應商正處於 cooldown，約 {cooldownMinutes} 分鐘後才會再嘗試未取得資料的股票。</p>}
+        {!coverage.persistenceAvailable && <p className="mt-1 text-red-300">持久快取未可用：{coverage.persistenceError || 'server-only Supabase 設定尚未完成。'}</p>}
       </div>}
       {data && picks.length === 0 && <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 p-4 text-sm text-slate-400"><Clock className="w-4 h-4" />暫時沒有合格訊號；系統不會為湊數而顯示交易建議。</div>}
       {rejectionSummary.length > 0 && <div className="mb-3 rounded-xl border border-white/10 bg-white/5 p-3"><p className="mb-2 text-xs font-semibold text-slate-200">本輪淘汰統計（每隻股票只按最後未通過規則計一次）</p><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{rejectionSummary.map((item) => <div key={item.code} className="flex items-center justify-between rounded-lg bg-slate-950/40 px-2.5 py-2 text-xs"><span className="text-slate-400">{item.label}</span><span className="font-semibold text-white">{item.count}</span></div>)}</div></div>}

@@ -62,3 +62,41 @@ TWELVE_DATA_429_COOLDOWN_MS=900000
 淘汰統計是**規則診斷工具**，不是勝率預測。它能解釋為何系統拒絕一隻股票，不能保證放寬某條規則後會賺錢。資料來源包括 Finnhub 報價／新聞／業績和 Twelve Data 日線；任何 provider 限流、延遲或缺失都會降低掃描覆蓋率。
 
 本文件以 2026-08-18 的專案設定為基礎。這是研究和系統分析，不是個人化投資建議。
+
+## Vercel Hobby：持久日線快取與 Quote Fallback
+
+Vercel Hobby 的 cron job 每日只可執行一次，且觸發時間可在指定小時內偏移；因此不可把 44 隻日線拆成每分鐘 Vercel cron。此版本改用 **GitHub Actions 收市後預熱**，並把已完成交易日的 3 個月 OHLCV 寫入 Supabase。正常掃描時，EMA、RSI、ATR、阻力位與風險回報使用該持久資料；當日相對強度、入場價及新聞仍於每次掃描即時取得。
+
+| 情況 | 掃描行為 | 前端解讀 |
+|---|---|---|
+| 44 隻持久日線均在有效期內 | 44 quote + 44 日線詳析 | 「零推介」代表完整資料及現有規則下沒有合格訊號。 |
+| 預熱首次執行、部分失敗或 cache 過期 | 44 quote 預篩 + 最強 6 隻日線詳析 | 「零推介」只代表詳析候選不合格，不代表其餘股票均已完成日線分析。 |
+| Twelve Data 回 HTTP 429 | 預熱停止該 batch；掃描保持持久資料或 A fallback | 顯示供應商 429/cooldown，絕不把它混成完整零訊號。 |
+
+### 一次性設定
+
+1. 在 Supabase SQL Editor 執行 `supabase/migrations/20260821010000_create_us_daily_history_cache.sql`。
+2. 到 Supabase Dashboard 的 **Project Settings → API Keys**，複製 server-side `service_role` / `secret` key。不要把它貼進 GitHub、前端程式碼、`NEXT_PUBLIC_*` variable 或任何對話訊息。
+3. 在 Vercel Environment Variables（Production 和 Preview）新增以下 server-only variables：
+
+```text
+SUPABASE_SERVICE_ROLE_KEY=<只貼到 Vercel 的 Supabase service role key>
+US_HISTORY_CACHE_MAX_AGE_HOURS=72
+```
+
+4. 在 GitHub repository **Settings → Secrets and variables → Actions** 新增：
+
+```text
+CRON_SECRET=<與 Vercel CRON_SECRET 完全相同的值>
+US_HISTORY_PREWARM_URL=https://aistocktool-winwin.vercel.app/api/history-prewarm
+```
+
+5. 在 GitHub Actions 手動執行一次 `Prewarm US Daily History Cache` workflow，確認 8 個 batch 都成功。自動排程會於每個美股交易日收市後開始；每批 6 隻，相隔 70 秒，約 9 分鐘完成 44 隻。
+
+> `SUPABASE_SERVICE_ROLE_KEY` 只由 `/api/history-prewarm` 及 server scanner 使用。`us_daily_history_cache` 已啟用 RLS 且沒有 anon/authenticated policy，因此瀏覽器、登入用戶及公開 API 均不可直接讀寫該表。
+
+### Vercel Hobby 的限制與可觀測性
+
+GitHub scheduled workflow 和 Vercel cron 均可能存在觸發延遲；因此畫面永遠顯示即時 quote 覆蓋、持久日線新鮮覆蓋及是否正在 A fallback。這比靜默使用不足 8/44 的資料可靠，也能令使用者分辨「真零訊號」與「資料仍在預熱」。
+
+本功能處理資料覆蓋與可解釋性，不保證交易勝率或盈利。
